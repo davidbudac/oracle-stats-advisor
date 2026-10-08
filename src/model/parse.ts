@@ -1,9 +1,12 @@
 // parsePrefs: read a form out of pasted text. The collector script's block (ADVISOR INPUT BEGIN to
 // END: preferences, counts and names as NAME = VALUE lines), or just preferences as
 // SET_TABLE_PREFS / SET_GLOBAL_PREFS calls, DBA_TAB_STAT_PREFS rows, NAME = VALUE lines or the
-// one-row output of a GET_PREFS query.
+// one-row output of a GET_PREFS query. Beside the form it keeps what the setup scripts need: the
+// pasted text of each preference, the TABLE_PREFS list (preferences the table sets itself) and the
+// HISTOGRAM_COLUMNS list.
 
 import { GRANULARITIES, NAME_MAX, OPTIONS, type Input } from "./defaults";
+import { emptyProvenance, type Provenance } from "./setup";
 
 const ALIASES: Record<string, string> = {
   incremental: "INCREMENTAL", incremental_level: "INCREMENTAL_LEVEL", incr_level: "INCREMENTAL_LEVEL",
@@ -132,22 +135,34 @@ function applyPref(name: string, raw: unknown, values: Values, notes: string[]):
   return { ok: true };
 }
 
-export interface Parsed { values: Partial<Input>; recognised: string[]; ignored: string[]; ignoredDetail: { line: string; reason: string }[]; notes: string[] }
+export interface Parsed { values: Partial<Input>; recognised: string[]; ignored: string[]; ignoredDetail: { line: string; reason: string }[]; notes: string[]; provenance: Provenance }
+
+/** The list keys of the collector's block, read into the provenance rather than the form. */
+const LIST_KEYS: Record<string, "tablePrefs" | "histogramColumns"> = { TABLE_PREFS: "tablePrefs", HISTOGRAM_COLUMNS: "histogramColumns" };
+const splitList = (v: string) => v.split(/[,\s]+/).map((x) => x.trim().replace(/^"(.*)"$/s, "$1")).filter(Boolean).map((x) => x.slice(0, NAME_MAX));
 
 export function parsePrefs(text: string | null | undefined): Parsed {
   const values: Values = {}, recognised: string[] = [], ignored: string[] = [], ignoredDetail: { line: string; reason: string }[] = [], notes: string[] = [];
+  const provenance = emptyProvenance();
   const reject = (raw: string, reason: string) => { const line = raw.trim().replace(/\s+/g, " "); ignored.push(line); ignoredDetail.push({ line, reason }); };
-  const take = (name: string, value: string, line: string) => {
+  const take = (name: string, value: string, line: string, tableLevel = false) => {
     const r = applyPref(name, value, values, notes);
-    if (r.ok) { if (!recognised.includes(name)) recognised.push(name); } else reject(line, r.reason);
+    if (r.ok) {
+      if (!recognised.includes(name)) recognised.push(name);
+      provenance.raw[name] = String(value ?? "").trim().replace(/^'(.*)'$/s, "$1").trim();
+      if (tableLevel) { provenance.tablePrefs ??= []; if (!provenance.tablePrefs.includes(name)) provenance.tablePrefs.push(name); }
+    } else reject(line, r.reason);
   };
-  const route = (name: string, value: string, line: string) => {
+  const route = (name: string, value: string, line: string, tableLevel = false) => {
     const key = String(name).trim().toUpperCase();
     const c = canonical(name);
-    if (Object.hasOwn(FORM_KEYS, key)) {
+    if (Object.hasOwn(LIST_KEYS, key)) {
+      provenance[LIST_KEYS[key]!] = splitList(String(value ?? "").trim().replace(/^\((.*)\)$/s, "$1"));
+      if (!recognised.includes(key)) recognised.push(key);
+    } else if (Object.hasOwn(FORM_KEYS, key)) {
       const r = applyKey(key, value, values);
       if (r.ok) { if (!recognised.includes(key)) recognised.push(key); } else reject(line, r.reason);
-    } else if (c) take(c, value, line);
+    } else if (c) take(c, value, line, tableLevel);
     else reject(line, UNMODELLED.has(key) ? "not modelled" : "not recognised");
   };
 
@@ -164,11 +179,12 @@ export function parsePrefs(text: string | null | undefined): Parsed {
   // 1. SET_TABLE_PREFS('X', 'Y', 'NAME', 'VALUE'), SET_SCHEMA_PREFS(...), SET_GLOBAL_PREFS('NAME', 'VALUE')
   const rest = source.replace(/SET_(TABLE|SCHEMA|GLOBAL)_PREFS\s*\(((?:'(?:[^']|'')*'|[^')])*)\)/gi, (whole: string, kind: string, args: string) => {
     const q = [...args.matchAll(/'((?:[^']|'')*)'/g)].map((m) => (m[1] ?? "").replace(/''/g, "'"));
+    if (/,\s*NULL\s*$/i.test(args)) q.push("NULL"); // an unquoted NULL as the value: "no staleness flag"
     const k = kind.toUpperCase();
     const [name, value] = k === "TABLE" ? [q[2], q[3]] : k === "SCHEMA" ? [q[1], q[2]] : [q[0], q[1]];
     const line = whole.replace(/\s+/g, " ").trim();
     if (name === undefined || value === undefined) reject(line, "could not read the arguments");
-    else route(name, value, line);
+    else route(name, value, line, k === "TABLE");
     return "\n";
   });
 
@@ -216,5 +232,5 @@ export function parsePrefs(text: string | null | undefined): Parsed {
     if (hit >= 0) { const m = toks[hit]!; route(m[0], t.slice((m.index ?? 0) + m[0].length).trim(), t); }
     else reject(t, "not recognised");
   }
-  return { values: values as Partial<Input>, recognised, ignored, ignoredDetail, notes };
+  return { values: values as Partial<Input>, recognised, ignored, ignoredDetail, notes, provenance };
 }

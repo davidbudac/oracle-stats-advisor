@@ -25,6 +25,10 @@
 --   TABLE_STATS               gathered | none (no LAST_ANALYZED) | load (column NOTES say STATS_ON_LOAD)
 --   TABLE_CHANGE_PERCENT      the table-level row of DBA_TAB_MODIFICATIONS relative to NUM_ROWS
 --   the preferences           DBMS_STATS.GET_PREFS(name, owner, table): the value in force
+--   TABLE_PREFS               the preferences the table sets itself (DBA_TAB_STAT_PREFS); the rollback script
+--                             deletes a changed preference that is not listed here so it inherits again
+--   HISTOGRAM_COLUMNS         the visible columns whose global statistics have a histogram; the recommended
+--                             METHOD_OPT pins them
 --   SYNOPSES                  all when every analysed partition has a synopsis (DBA_PART_COL_STATISTICS
 --                             NOTES with HYPERLOGLOG or ADAPTIVE_SAMPLING) and the global column NOTES
 --                             say INCREMENTAL; none when no partition has one; stale otherwise
@@ -119,6 +123,14 @@ WITH p AS (
          (SELECT COUNT(*) FROM dba_part_indexes i WHERE i.owner = tb.own AND i.table_name = tb.tab AND i.locality = 'LOCAL') AS n_local,
          CASE WHEN EXISTS (SELECT 1 FROM dba_tab_col_statistics c WHERE c.owner = tb.own AND c.table_name = tb.tab
                            AND c.histogram IS NOT NULL AND c.histogram <> 'NONE') THEN '1' ELSE '0' END AS has_hist,
+         (SELECT LISTAGG(c.column_name, ',') WITHIN GROUP (ORDER BY c.column_id)
+          FROM   dba_tab_cols c
+          WHERE  c.owner = tb.own AND c.table_name = tb.tab AND c.hidden_column = 'NO'
+          AND    EXISTS (SELECT 1 FROM dba_tab_col_statistics cs
+                         WHERE  cs.owner = c.owner AND cs.table_name = c.table_name AND cs.column_name = c.column_name
+                         AND    cs.histogram IS NOT NULL AND cs.histogram <> 'NONE')) AS hist_cols,
+         (SELECT LISTAGG(sp.preference_name, ',') WITHIN GROUP (ORDER BY sp.preference_name)
+          FROM   dba_tab_stat_prefs sp WHERE sp.owner = tb.own AND sp.table_name = tb.tab) AS tbl_prefs,
          CASE WHEN tb.last_analyzed IS NULL THEN 'none'
               WHEN EXISTS (SELECT 1 FROM dba_tab_col_statistics c WHERE c.owner = tb.own AND c.table_name = tb.tab
                            AND c.notes LIKE '%STATS_ON_LOAD%') THEN 'load'
@@ -190,6 +202,8 @@ FROM   w,
          'DEGREE = ' || NVL(w.p_degree, 'NULL'),
          'STALE_PERCENT = ' || NVL(w.p_stale_percent, 'NULL'),
          'PREFERENCE_OVERRIDES_PARAMETER = ' || NVL(w.p_overrides, 'NULL'),
+         'TABLE_PREFS = ' || w.tbl_prefs,
+         'HISTOGRAM_COLUMNS = ' || w.hist_cols,
          'SYNOPSES = ' || w.synopses,
          'NEW_PARTITIONS = ' || TO_CHAR(NVL(w.n_no_stats, 0) + CASE WHEN w.synopses = 'all' THEN NVL(w.n_lack_syn, 0) ELSE 0 END),
          'NEW_PARTITION = ' || w.name_new,

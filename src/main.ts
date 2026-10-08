@@ -1,5 +1,5 @@
 import "./style.css";
-import { DEFAULTS, PRESETS, RECOMMENDED, STRINGS, advise, clampInput, decodeInput, encodeInput, parsePrefs, type Input } from "./model";
+import { DEFAULTS, PREF_OF_FIELD, PRESETS, RECOMMENDED, STRINGS, advise, clampInput, decodeInput, encodeInput, parsePrefs, setupScripts, type Input, type Provenance } from "./model";
 import { buildForm } from "./ui/form";
 import { createResult } from "./ui/result";
 import { el } from "./ui/dom";
@@ -31,6 +31,8 @@ const $ = <T extends HTMLElement = HTMLElement>(sel: string) => document.querySe
 const keys = Object.keys(DEFAULTS) as (keyof Input)[];
 let current: Input = { ...DEFAULTS };
 let lastHash: string | null = null;
+// what the last paste said beyond the form (exact preference texts, table-level list, histogram columns); null until a paste fills the form
+let loaded: Provenance | null = null;
 const result = createResult(document);
 const { ctl, applyVisibility } = buildForm($("#form"), (key) => update(key));
 
@@ -57,6 +59,8 @@ function render(input: Input, clampNotes: string[]) {
   }
 }
 function update(edited?: keyof Input) {
+  const pref = edited && PREF_OF_FIELD[edited];
+  if (pref && loaded) delete loaded.raw[pref]; // the reader overrode the pasted text: the form value is now the truth
   const raw = readState();
   const { input, notes } = clampInput(raw, edited);
   writeState(input, raw);
@@ -69,8 +73,12 @@ function apply(partial: Partial<Input>, edited?: keyof Input) {
   render(input, notes);
 }
 
-$("#recommended").addEventListener("click", () => apply({ ...RECOMMENDED }));
-$("#reset").addEventListener("click", () => apply({ ...DEFAULTS, owner: current.owner, tableName: current.tableName }));
+$("#recommended").addEventListener("click", () => {
+  result.showSetup(setupScripts(current, loaded), loaded !== null);
+  apply({ ...RECOMMENDED });
+  $("#setup").scrollIntoView({ behavior: "smooth", block: "nearest" });
+});
+$("#reset").addEventListener("click", () => { loaded = null; apply({ ...DEFAULTS, owner: current.owner, tableName: current.tableName }); });
 
 // ---- presets
 {
@@ -79,7 +87,7 @@ $("#reset").addEventListener("click", () => apply({ ...DEFAULTS, owner: current.
   sel.addEventListener("change", () => {
     const p = PRESETS.find((x) => x.id === sel.value);
     $("#preset-blurb").textContent = p ? p.blurb : "";
-    if (p) apply({ ...DEFAULTS, owner: current.owner, tableName: current.tableName, ...p.values });
+    if (p) { loaded = null; apply({ ...DEFAULTS, owner: current.owner, tableName: current.tableName, ...p.values }); }
   });
 }
 
@@ -89,6 +97,7 @@ $("#reset").addEventListener("click", () => apply({ ...DEFAULTS, owner: current.
   $("#fill").addEventListener("click", () => {
     const r = parsePrefs(paste.value);
     if (!r.recognised.length && !r.ignored.length) { parsed.replaceChildren("Nothing to read yet. Paste the block from collect.sql, or SET_TABLE_PREFS calls, DBA_TAB_STAT_PREFS rows, NAME = VALUE lines or the GET_PREFS output."); return; }
+    loaded = r.provenance;
     apply(r.values);
     parsed.replaceChildren(
       el("strong", {}, "Recognised: "), `${r.recognised.length ? r.recognised.join(", ") : "nothing"}. `,

@@ -43,6 +43,24 @@ statements. Only the lines between `ADVISOR INPUT BEGIN` and `END` are read; an 
 the middle (for example `REPORT_COL_USAGE` without the privilege) is skipped. The output ends with
 the dry run, `REPORT_GATHER_TABLE_STATS`, to compare with the advisor's partition count.
 
+With the form filled, **Use the recommended setup** does two things: it switches the form to the
+chapter 8 setup (INCREMENTAL, staleness by percent, pinned histograms, the override on), and it
+writes two scripts for the table as it was at that moment. *Apply* is the `SET_TABLE_PREFS` calls
+for every preference that differs, with the first incremental gather as a commented line;
+*Roll back* restores the previous values. The collector reports which preferences the table set
+itself (`TABLE_PREFS`) and which columns have a histogram (`HISTOGRAM_COLUMNS`), so the rollback
+deletes a preference the table inherited rather than pinning it, and the pinned `METHOD_OPT`
+lists the histogram columns. Without that paste the scripts still work, with placeholders.
+
+To get only the settings, without the page: `sql/recommend.sql` prints the DBMS_STATS preferences
+in force for one table (current value, whether it is a table or a global preference, recommended
+value) and the `SET_TABLE_PREFS` / unlock statements the advisor would propose, with the reason
+after each. Same privileges and invocation as `collect.sql`; nothing is changed or gathered:
+
+```
+SQL> @recommend.sql SHOP SALES
+```
+
 ## What it models
 
 - **A partitioned table under `GATHER_TABLE_STATS`**: INCREMENTAL and its four conditions
@@ -78,11 +96,13 @@ Layout:
 index.html             the page (markup only; the form is built by src/ui/form.ts)
 src/main.ts            bootstrap: theme, form, presets, paste box, URL hash
 src/model/             pure TypeScript, no DOM: defaults.ts (fields, defaults, presets),
-                       advise.ts (the rules), parse.ts (paste parser), hash.ts, clamp.ts
+                       advise.ts (the rules), parse.ts (paste parser), setup.ts (apply and
+                       rollback scripts of the recommended setup), hash.ts, clamp.ts
 src/ui/                form builder, result renderer, stacked bar, DOM helpers
 src/style.css          tokens (light and dark), layout, components
 sql/collect.sql        the collector script (copied into dist/ as collect.sql)
-test/                  vitest: advise.test.ts, parse.test.ts
+sql/recommend.sql      current vs recommended preferences for one table, standalone (not in the build)
+test/                  vitest: advise.test.ts, parse.test.ts, setup.test.ts
 docs/lab-observations.md   the 19.27 lab log the partitioned rules cite
 ```
 

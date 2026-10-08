@@ -40,7 +40,7 @@
 
       <details class="paste" id="paste-box">
         <summary>Fill the form from your database</summary>
-        <p>Run <code>collect.sql</code> (pure SQL, dictionary reads only) as <code>@collect.sql OWNER TABLE</code> in the PDB that owns the table, in SQL*Plus, SQLcl or SQL Developer, and paste the whole output here: every field is filled, names included. Only the lines between <code>ADVISOR INPUT BEGIN</code> and <code>END</code> are read; an <code>ORA-</code> error in the middle is skipped. Without the script, paste the preferences alone: <code>SET_TABLE_PREFS</code> calls, <code>DBA_TAB_STAT_PREFS</code> rows, <code>NAME = VALUE</code> lines or the one-row output of a <code>GET_PREFS</code> query.</p>
+        <p>Run <code>collect.sql</code> (pure SQL, dictionary reads only) as <code>@collect.sql OWNER TABLE</code> in the PDB that owns the table, in SQL*Plus, SQLcl or SQL Developer, and paste the whole output here: every field is filled, names included. Only the lines between <code>ADVISOR INPUT BEGIN</code> and <code>END</code> are read; an <code>ORA-</code> error in the middle is skipped. The script also records which preferences the table sets itself and which columns have a histogram, so that <em>Use the recommended setup</em> can write an exact apply and rollback script. Without the script, paste the preferences alone: <code>SET_TABLE_PREFS</code> calls, <code>DBA_TAB_STAT_PREFS</code> rows, <code>NAME = VALUE</code> lines or the one-row output of a <code>GET_PREFS</code> query.</p>
         <textarea id="paste" rows="7" spellcheck="false" placeholder="-- ADVISOR INPUT BEGIN
 OWNER = SHOP
 TABLE_NAME = SALES
@@ -97,6 +97,15 @@ INCREMENTAL = TRUE
           <div><h4>What runs</h4><pre class="sql"><code id="sql"></code></pre></div>
           <div><h4>What to change</h4><pre class="sql"><code id="fixes"></code></pre></div>
           <div class="wide"><h4>Verify afterwards</h4><pre class="sql"><code id="verify"></code></pre></div>
+        </div>
+      </section>
+
+      <section class="block" id="setup" hidden aria-labelledby="setup-h">
+        <h3 id="setup-h">Recommended setup: apply and roll back</h3>
+        <p class="lead" id="setup-note"></p>
+        <div class="sqlgrid">
+          <div><h4>Apply</h4><pre class="sql"><code id="setup-apply"></code></pre></div>
+          <div><h4>Roll back</h4><pre class="sql"><code id="setup-rollback"></code></pre></div>
         </div>
       </section>
 

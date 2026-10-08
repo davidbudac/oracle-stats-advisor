@@ -3,6 +3,7 @@ import { fmt, plural } from "../model/format";
 import type { Input } from "../model/defaults";
 import { stepsOf, verifySql } from "../model/advise";
 import type { Level, Outcome, Source } from "../model/types";
+import type { SetupScripts } from "../model/setup";
 import { copyButton, el, highlightSql } from "./dom";
 import { stackBar, type Segment } from "./stackbar";
 
@@ -24,7 +25,8 @@ export function createResult(root: Document | HTMLElement) {
   const nowBar = stackBar($("#bar-now"), "Blocks read by this gather");
   const nextBar = stackBar($("#bar-next"), "Blocks read by the next plain gather");
   const sqlCode = $("#sql"), fixCode = $("#fixes"), verifyCode = $("#verify");
-  for (const code of [sqlCode, fixCode, verifyCode]) code.parentElement!.append(copyButton(() => code.textContent ?? ""));
+  const setupBlock = $("#setup"), setupNote = $("#setup-note"), applyCode = $("#setup-apply"), rollbackCode = $("#setup-rollback");
+  for (const code of [sqlCode, fixCode, verifyCode, applyCode, rollbackCode]) code.parentElement!.append(copyButton(() => code.textContent ?? ""));
 
   function segs(o: Outcome): Segment[] {
     const B = o.input.blocksPerPartition, f = o.scan.kind === "block-sample" && o.scan.percent ? o.scan.percent / 100 : 1;
@@ -136,5 +138,16 @@ export function createResult(root: Document | HTMLElement) {
     clamp.textContent = clampNotes.join(" ");
     clamp.hidden = clampNotes.length === 0;
   }
-  return { render };
+  /** Show the apply and rollback scripts of the recommended setup, as computed from the form at the moment of the click. */
+  function showSetup(scripts: SetupScripts, loadedFromDb: boolean) {
+    setupNote.textContent = (scripts.changed.length
+      ? `Run Apply in the PDB that owns the table to set ${scripts.changed.length === 1 ? "the one preference" : `the ${scripts.changed.length} preferences`} that differ from the recommended setup; Roll back puts the previous ${scripts.changed.length === 1 ? "value" : "values"} back. `
+      : "The table already has the recommended preferences; there is nothing to apply or roll back. ")
+      + "Both scripts describe the form as it was when you clicked the button"
+      + (loadedFromDb ? ", filled from your database." : ". Fill the form from collect.sql first for the exact previous values and an exact rollback.");
+    applyCode.innerHTML = highlightSql(scripts.apply);
+    rollbackCode.innerHTML = highlightSql(scripts.rollback);
+    setupBlock.hidden = false;
+  }
+  return { render, showSetup };
 }
