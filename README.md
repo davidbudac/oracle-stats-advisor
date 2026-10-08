@@ -15,6 +15,11 @@ to plain tables, the automatic job, histograms, indexes and cursor invalidation.
 
 ## Use it
 
+No build needed: `prebuilt/gather-advisor.html` is the committed build (with `prebuilt/collect.sql`
+next to it for the download link). Open it straight from disk.
+
+To build it yourself:
+
 ```sh
 npm install
 npm run build        # dist/index.html (self-contained) + dist/collect.sql
