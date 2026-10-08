@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Gather advisor · what DBMS_STATS will do to your table (Oracle 19c)</title>
+  <meta name="description" content="Describe an Oracle 19c table, its statistics preferences, the gather call and what changed. The advisor says what the gather reads, how it computes each statistic, whether the global statistics are refreshed, and what the next gather reads.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%233A45B5'/%3E%3Crect x='6' y='18' width='5' height='8' fill='%23fff'/%3E%3Crect x='13.5' y='11' width='5' height='15' fill='%23fff'/%3E%3Crect x='21' y='6' width='5' height='20' fill='%23fff'/%3E%3C/svg%3E">
+  <script type="module" src="/src/main.ts"></script>
+</head>
+<body>
+  <a class="skip" href="#result">Skip to the result</a>
+  <header class="topbar">
+    <div class="brand">
+      <span class="eyebrow">Oracle 19c · DBMS_STATS</span>
+      <h1>Gather advisor</h1>
+    </div>
+    <nav class="topnav" aria-label="Page">
+      <a href="#describe">Describe</a>
+      <a href="#result">Result</a>
+      <a href="#about">About</a>
+      <button type="button" class="btn ghost" id="theme" aria-pressed="false">Dark</button>
+    </nav>
+  </header>
+
+  <main class="layout">
+    <section class="pane form-pane" id="describe" aria-labelledby="describe-h">
+      <header class="pane-head">
+        <h2 id="describe-h">Describe the table</h2>
+        <p class="lead">A table, the preferences in force, the call that will run, and what changed since the last gather. The result updates as you type and lives in the address bar, so you can share it.</p>
+      </header>
+
+      <div class="presets" role="group" aria-label="Start from a situation">
+        <label class="ctl">Start from a situation
+          <select id="preset"></select>
+        </label>
+        <p class="preset-blurb" id="preset-blurb"></p>
+      </div>
+
+      <details class="paste" id="paste-box">
+        <summary>Fill the form from your database</summary>
+        <p>Run <code>sql/collect.sql</code> (dictionary reads only) as <code>@collect.sql OWNER TABLE</code> in the PDB that owns the table and paste its output. Only the lines between <code>ADVISOR INPUT BEGIN</code> and <code>END</code> are read. Without the script, paste the preferences alone: <code>SET_TABLE_PREFS</code> calls, <code>DBA_TAB_STAT_PREFS</code> rows, <code>NAME = VALUE</code> lines or the one-row output of a <code>GET_PREFS</code> query.</p>
+        <textarea id="paste" rows="7" spellcheck="false" placeholder="-- ADVISOR INPUT BEGIN
+OWNER = SHOP
+TABLE_NAME = SALES
+INCREMENTAL = TRUE
+..."></textarea>
+        <div class="btn-row">
+          <button type="button" class="btn" id="fill">Fill the form</button>
+          <a class="btn ghost" id="collect-link" href="./collect.sql" download>Download collect.sql</a>
+        </div>
+        <p class="parsed" id="parsed" aria-live="polite"></p>
+      </details>
+
+      <form id="form" autocomplete="off" onsubmit="return false"></form>
+      <p class="clamp" id="clamp" hidden aria-live="polite"></p>
+    </section>
+
+    <section class="pane result-pane" id="result" aria-labelledby="result-h" aria-live="polite">
+      <header class="pane-head">
+        <h2 id="result-h">What the gather will do</h2>
+        <p class="verdict-line" id="verdict"></p>
+        <p class="names-note" id="names-note">The statements below use <code>OWNER</code> and <code>TABLE</code> as placeholders. Fill in Owner and Table to replace them.</p>
+      </header>
+
+      <section class="block" aria-labelledby="reads-h">
+        <h3 id="reads-h">What is read</h3>
+        <div class="bars">
+          <div class="bar-card"><h4>This gather</h4><div id="bar-now"></div></div>
+          <div class="bar-card"><h4 id="bar-next-h">The next plain gather</h4><div id="bar-next"></div></div>
+        </div>
+        <div class="pmap" id="pmap"></div>
+        <dl class="readout" id="readout"></dl>
+        <p class="tip" id="tip"></p>
+      </section>
+
+      <section class="block" aria-labelledby="steps-h">
+        <h3 id="steps-h">Step by step</h3>
+        <ol class="steps" id="steps"></ol>
+      </section>
+
+      <section class="block" aria-labelledby="settings-h">
+        <h3 id="settings-h">Where each setting came from</h3>
+        <p class="effective" id="effective"></p>
+        <table class="resolved" id="resolved"></table>
+      </section>
+
+      <section class="block" aria-labelledby="findings-h">
+        <h3 id="findings-h">Findings</h3>
+        <ul class="findings" id="findings"></ul>
+      </section>
+
+      <section class="block" aria-labelledby="sql-h">
+        <h3 id="sql-h">SQL</h3>
+        <div class="sqlgrid">
+          <div><h4>What runs</h4><pre class="sql"><code id="sql"></code></pre></div>
+          <div><h4>What to change</h4><pre class="sql"><code id="fixes"></code></pre></div>
+          <div class="wide"><h4>Verify afterwards</h4><pre class="sql"><code id="verify"></code></pre></div>
+        </div>
+      </section>
+
+      <details class="deep" id="about">
+        <summary>About this advisor, and what it does not model</summary>
+        <p>Every rule on partitioned tables was observed on a lab copy of a 24-month SALES table on Oracle 19.27, or comes from the 19c documentation; each finding says which, and says <em>inferred</em> when a combination was not run. The rules on plain tables, histograms, indexes and invalidation come from the 19c SQL Tuning Guide and the DBMS_STATS reference. The lab log is in <code>docs/lab-observations.md</code>.</p>
+        <ul>
+          <li><b>Blocks</b> are counted as whole partitions. A row sample still visits every block, so a sampled pass costs the same blocks as a full one; only a block sample reads less.</li>
+          <li><b>Subpartitions.</b> With GRANULARITY AUTO a composite table keeps partition statistics and partition synopses. In the lab, DML in one of four hash subpartitions made the whole parent partition read again.</li>
+          <li><b>Partition exchange.</b> The gather after an exchange reads nothing only if the empty partition was gathered first, the staging table has a table-level synopsis (INCREMENTAL TRUE, INCREMENTAL_LEVEL TABLE) and both sides have the same histograms. Model the staging table as a plain table here.</li>
+          <li><b>Degree and concurrency</b> change how long a gather takes, not what it reads. They are shown, not modelled.</li>
+          <li><b>Real-time and high-frequency statistics, online statistics for loads</b> are other mechanisms; this page models one gather and the nightly job.</li>
+          <li><b>Other versions.</b> Everything was observed on 19.27. Run the dry run, REPORT_GATHER_TABLE_STATS, on your own table: it reads nothing and lists what the next gather would read.</li>
+        </ul>
+      </details>
+    </section>
+  </main>
+  <footer class="foot">Written for Oracle Database 19c. A companion to <a href="https://stats-explained.davidbudac.cz">Optimizer Statistics, explained</a>. No server, no tracking: everything runs in this page.</footer>
+</body>
+</html>

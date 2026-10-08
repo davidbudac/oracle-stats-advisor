@@ -1,0 +1,23 @@
+{
+  "name": "oracle-stats-advisor",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "What a DBMS_STATS gather will do to one Oracle 19c table: what it reads, what it builds, what it leaves behind, what the next gather reads. HTML + TypeScript, no backend.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm run test && npm run build"
+  },
+  "devDependencies": {
+    "jsdom": "^28.1.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.3",
+    "vite-plugin-singlefile": "^2.3.3",
+    "vitest": "^5.0.3"
+  }
+}
