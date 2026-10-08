@@ -109,6 +109,19 @@ OWNER = SOMEONE_ELSE
     expect(bare.ignoredDetail.map((d) => d.line)).toEqual(["SYNOPSES = sometimes", "PARTITIONS_X = 3"]);
     expect(bare.ignoredDetail[0]!.reason).toMatch(/expected all, none, stale/);
   });
+  test("an error from statement 2 of collect.sql does not spoil the paste, and a later key wins", () => {
+    const r = parsePrefs(`-- ADVISOR INPUT BEGIN
+COLUMN_USAGE = 0
+COLUMN_CHANGE = none
+ERROR at line 5:
+ORA-20000: Insufficient privileges to analyze an object in Schema
+old   2: SELECT UPPER('&adv_owner')
+new   2: SELECT UPPER('SHOP')
+COLUMN_CHANGE = usage
+-- ADVISOR INPUT END`);
+    expect(r.values).toEqual({ columnUsageRecorded: false, columnChange: "usage" });
+    expect(r.ignored).toEqual([]);
+  });
   test("INCREMENTAL_STALENESS NULL means the default flags", () => {
     const nul = parsePrefs("INCREMENTAL_STALENESS = NULL");
     expect(nul.values).toEqual({ useStalePercent: false, useLockedStats: false, allowMixedFormat: true });
@@ -123,5 +136,20 @@ describe("the URL hash", () => {
     expect(encodeInput(DEFAULTS)).toBe("");
     expect(encodeInput({ ...DEFAULTS, owner: "SHOP", partitioned: false, callEstimatePercent: 5 })).toBe("owner=SHOP&partitioned=0&callEstimatePercent=5");
     expect(decodeInput("owner=%20shop%20&tableName=&partitioned=0&runBy=auto&bogus=1&methodOpt=nope")).toEqual({ owner: "shop", partitioned: false, runBy: "auto" });
+  });
+});
+
+describe("a real collect.sql output (19.27, STATS_LAB.E1)", () => {
+  test("fills the whole form, names included, and the dry run after END is ignored", async () => {
+    const fs = await import("node:fs");
+    const text = fs.readFileSync(new URL("./fixtures/collect-e1.txt", import.meta.url), "utf8");
+    const r = parsePrefs(text);
+    expect(r.ignored).toEqual([]);
+    expect(r.values).toMatchObject({
+      owner: "STATS_LAB", tableName: "E1", partitioned: true, incremental: "TRUE", synopses: "stale",
+      lockedPartitions: 1, lockedChanged: 1, lockedPartitionName: "S_2024_05", columnUsageRecorded: false, columnChange: "none",
+      cascade: "AUTO_CASCADE", noInvalidate: "AUTO_INVALIDATE", options: "GATHER", degree: "NULL", tableStats: "gathered",
+    });
+    expect(r.recognised).toContain("COLUMN_USAGE");
   });
 });

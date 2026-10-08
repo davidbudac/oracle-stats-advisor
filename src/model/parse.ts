@@ -173,7 +173,7 @@ export function parsePrefs(text: string | null | undefined): Parsed {
   });
 
   const lines = rest.split(/\r?\n/);
-  const noise = /^(SQL>|PL\/SQL procedure|\d+ rows? selected|no rows selected|Elapsed:|\/$|BEGIN$|END;?$|DECLARE$|--)/i;
+  const noise = /^(SQL>|PL\/SQL procedure|\d+ rows? selected|no rows selected|Elapsed:|\/$|BEGIN$|END;?$|DECLARE$|--|ORA-\d+|ERROR at line|Enter value for|old\s+\d+:|new\s+\d+:|\*$)/i;
   const columns = (dl: string) => [...dl.matchAll(/-+/g)].map((m) => ({ start: m.index ?? 0 }));
   const slices = (cols: { start: number }[], line: string) => cols.map((c, i) => line.slice(c.start, i + 1 < cols.length ? cols[i + 1]!.start : undefined).trim());
 

@@ -1,0 +1,65 @@
+-- Gather advisor input for STATS_LAB.E1, collected 2026-10-08 08:02:30
+-- paste everything from BEGIN to END (the whole output is fine) into the advisor
+-- ADVISOR INPUT BEGIN
+OWNER = STATS_LAB
+TABLE_NAME = E1
+PARTITIONED = YES
+PARTITIONS = 10
+BLOCKS_PER_PARTITION = 65
+NUM_ROWS = 100400
+COLUMNS = 6
+INDEXES = 0
+LOCAL_INDEXES = 0
+HISTOGRAMS = 1
+TABLE_STATS = gathered
+TABLE_CHANGE_PERCENT = 0.00
+INCREMENTAL = TRUE
+INCREMENTAL_LEVEL = PARTITION
+INCREMENTAL_STALENESS = ALLOW_MIXED_FORMAT
+PUBLISH = TRUE
+ESTIMATE_PERCENT = DBMS_STATS.AUTO_SAMPLE_SIZE
+GRANULARITY = AUTO
+METHOD_OPT = FOR ALL COLUMNS SIZE 1 FOR COLUMNS SIZE 254 STATUS
+CASCADE = DBMS_STATS.AUTO_CASCADE
+NO_INVALIDATE = DBMS_STATS.AUTO_INVALIDATE
+OPTIONS = GATHER
+DEGREE = NULL
+STALE_PERCENT = 10
+PREFERENCE_OVERRIDES_PARAMETER = FALSE
+SYNOPSES = stale
+NEW_PARTITIONS = 0
+NEW_PARTITION =
+CHANGED_PARTITIONS = 0
+CHANGED_PARTITION =
+CHANGE_PERCENT = 0.0
+LOCKED_PARTITIONS = 1
+LOCKED_CHANGED = 1
+LOCKED_PARTITION = S_2024_05
+LOCKED_NO_SYNOPSIS = 0
+TABLE_LOCKED = 0
+COLUMN_CHANGE = none
+-- (statement 2 below may override COLUMN_CHANGE and COLUMN_USAGE from the column usage report)
+COLUMN_USAGE = 0
+-- COLUMN_CHANGE: unchanged by the column usage report
+-- columns used in predicates without a histogram: (none)
+-- ADVISOR INPUT END
+--   S_2024_05                        locked (ALL); 400 rows changed of 10,000; STALE_STATS=NO
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+| Operation Id | Operation                           | Target           | Start Time | End Time | Status | Total Tasks | Successful Tasks | Failed Tasks | Active Tasks                               |
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+| 4599         | gather_table_stats (reporting mode) | "STATS_LAB"."E1" |            |          |        | 1           |                  |              |                                            |
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+|                                                                                                                                                                                                     |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|                                                                                              T A S K S                                                                                              |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|    ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------    |
+|    | Target           | Type  | Start Time | End Time | Status                                                                                                                                 |    |
+|    ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------    |
+|    | "STATS_LAB"."E1" | TABLE |            |          |                                                                                                                                        |    |
+|    ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------    |
+|                                                                                                                                                                                                     |
+|                                                                                                                                                                                                     |
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+

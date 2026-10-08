@@ -25,16 +25,18 @@ Open `dist/index.html` in a browser, or serve the `dist/` directory with anythin
 filled form can be shared as a link.
 
 To fill the form from a real table, run `sql/collect.sql` in the PDB that owns the table as a
-user who can read the `DBA_*` views and execute `DBMS_STATS`:
+user who can read the `DBA_*` views and call `DBMS_STATS` (SQL*Plus, SQLcl or SQL Developer):
 
 ```
 SQL> @collect.sql SHOP SALES
 ```
 
-Paste its output into "Fill the form from your database". It reads only the dictionary. It
-also tries `FLUSH_DATABASE_MONITORING_INFO` and `REPORT_COL_USAGE`, and skips them without the
-privilege. Its last section is the dry run, `REPORT_GATHER_TABLE_STATS`, to compare with the
-advisor's partition count. Status: written for 19c, not yet run against a database.
+It is pure SQL: three `SELECT`s over the dictionary (plus one optional, error-tolerant block
+that flushes the DML counters). Paste the whole output into "Fill the form from your database":
+every field is filled, including the owner, table and partition names used in the generated
+statements. Only the lines between `ADVISOR INPUT BEGIN` and `END` are read; an `ORA-` error in
+the middle (for example `REPORT_COL_USAGE` without the privilege) is skipped. The output ends with
+the dry run, `REPORT_GATHER_TABLE_STATS`, to compare with the advisor's partition count.
 
 ## What it models
 
