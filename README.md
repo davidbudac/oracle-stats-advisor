@@ -43,9 +43,12 @@ statements. Only the lines between `ADVISOR INPUT BEGIN` and `END` are read; an 
 the middle (for example `REPORT_COL_USAGE` without the privilege) is skipped. The output ends with
 the dry run, `REPORT_GATHER_TABLE_STATS`, to compare with the advisor's partition count.
 
-With the form filled, **Use the recommended setup** does two things: it switches the form to the
-chapter 8 setup (INCREMENTAL, staleness by percent, pinned histograms, the override on), and it
-writes two scripts for the table as it was at that moment. *Apply* is the `SET_TABLE_PREFS` calls
+With the form filled, **Use the recommended setup** leaves your setup as it is and opens a second
+view, the chapter 8 setup (INCREMENTAL, staleness by percent, pinned histograms, the override on)
+applied to your table. A switch at the top of the page flips the form and the result between
+*Your setup* and *Recommended*; the fields that differ are marked in both, and a table compares
+the verdict, the blocks read and each changed preference side by side. The recommended view is
+read-only and follows your setup as you edit it. It also writes two scripts from your setup. *Apply* is the `SET_TABLE_PREFS` calls
 for every preference that differs, with the first incremental gather as a commented line;
 *Roll back* restores the previous values. The collector reports which preferences the table set
 itself (`TABLE_PREFS`) and which columns have a histogram (`HISTOGRAM_COLUMNS`), so the rollback

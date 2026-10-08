@@ -40,6 +40,7 @@ export function createResult(root: Document | HTMLElement) {
       { label: "whole table again", value: Math.ceil(r.globalScan * B * f), color: "global" as const },
     ].filter((s) => s.value > 0);
   }
+  const blocks = (x: Outcome) => (x.error ? `${x.error}` : x.blocks ? `${fmt(x.blocks)} blocks` : "0 blocks");
   const indexNote = (o: Outcome) => (o.indexes.fullScans + o.indexes.partitionScans ? `plus ${plural(o.indexes.fullScans, "full index scan")}${o.indexes.partitionScans ? ` and ${plural(o.indexes.partitionScans, "index partition")}` : ""}` : "no index work");
 
   function partitionMap(o: Outcome): HTMLElement {
@@ -92,7 +93,6 @@ export function createResult(root: Document | HTMLElement) {
     $("#pmap").replaceChildren(partitionMap(o));
 
     const row = (dt: string, dd: Node | string, cls = "") => el("div", {}, [el("dt", {}, dt), el("dd", { class: cls }, dd)]);
-    const blocks = (x: Outcome) => (x.error ? `${x.error}` : x.blocks ? `${fmt(x.blocks)} blocks` : "0 blocks");
     $("#readout").replaceChildren(
       row("Read by this gather", blocks(o), "est"),
       row(auto ? "Read by the next job run" : "Read by the next plain gather", nx ? blocks(nx) : "–"),
@@ -138,16 +138,43 @@ export function createResult(root: Document | HTMLElement) {
     clamp.textContent = clampNotes.join(" ");
     clamp.hidden = clampNotes.length === 0;
   }
-  /** Show the apply and rollback scripts of the recommended setup, as computed from the form at the moment of the click. */
-  function showSetup(scripts: SetupScripts, loadedFromDb: boolean) {
-    setupNote.textContent = (scripts.changed.length
-      ? `Run Apply in the PDB that owns the table to set ${scripts.changed.length === 1 ? "the one preference" : `the ${scripts.changed.length} preferences`} that differ from the recommended setup; Roll back puts the previous ${scripts.changed.length === 1 ? "value" : "values"} back. `
+  /**
+   * Compare your setup with the recommended one, and show the apply and rollback scripts that take
+   * the first to the second. `showing` marks the column of the view on screen; null hides the block.
+   */
+  function showCompare(c: { yours: Outcome; rec: Outcome; scripts: SetupScripts; loadedFromDb: boolean; showing: "yours" | "rec" } | null) {
+    const block = $("#compare");
+    block.hidden = setupBlock.hidden = !c;
+    if (!c) return;
+    const { yours, rec, scripts } = c;
+    const n = scripts.changed.length;
+    const auto = yours.input.runBy === "auto";
+    const assumesSynopses = yours.input.partitioned && yours.input.synopses !== "all";
+    $("#compare-note").textContent = (n
+      ? `The recommended setup changes ${n === 1 ? "one preference" : `${n} preferences`}; everything else is your setup. Switch between the two at the top of the page.`
+      : "Your setup already has every preference of the recommended setup.")
+      + (assumesSynopses ? " The recommended column assumes every partition has a synopsis, as after the first incremental gather." : "");
+    const col = (v: "yours" | "rec") => (c.showing === v ? "on" : "");
+    const row = (label: Node | string, a: Node | string, b: Node | string) => el("tr", {}, [el("th", { scope: "row" }, label), el("td", { class: col("yours") }, a), el("td", { class: col("rec") }, b)]);
+    const pill = (o: Outcome) => el("span", { class: `verdict ${o.verdict[0]}` }, o.verdict[1]);
+    const next = (o: Outcome) => (o.next ? blocks(o.next) : "–");
+    $("#compare-table").replaceChildren(
+      el("thead", {}, el("tr", {}, [el("th", {}, ""), el("th", { class: col("yours") }, "Your setup"), el("th", { class: col("rec") }, "Recommended")])),
+      el("tbody", {}, [
+        row("Verdict", pill(yours), pill(rec)),
+        row("Read by this gather", blocks(yours), blocks(rec)),
+        row(auto ? "Read by the next job run" : "Read by the next plain gather", next(yours), next(rec)),
+        yours.input.partitioned ? row("Global statistics afterwards", GLOBAL_LABEL[yours.global], GLOBAL_LABEL[rec.global]) : null,
+        ...scripts.diff.map((d) => row(el("code", {}, d.name), el("code", {}, d.before ?? "NULL"), el("code", {}, d.after || "NULL"))),
+      ]),
+    );
+    setupNote.textContent = (n
+      ? `Run Apply in the PDB that owns the table to set ${n === 1 ? "the one preference" : `the ${n} preferences`} that differ from the recommended setup; Roll back puts the previous ${n === 1 ? "value" : "values"} back. `
       : "The table already has the recommended preferences; there is nothing to apply or roll back. ")
-      + "Both scripts describe the form as it was when you clicked the button"
-      + (loadedFromDb ? ", filled from your database." : ". Fill the form from collect.sql first for the exact previous values and an exact rollback.");
+      + "Both scripts start from your setup as the form describes it now"
+      + (c.loadedFromDb ? ", filled from your database." : ". Fill the form from collect.sql first for the exact previous values and an exact rollback.");
     applyCode.innerHTML = highlightSql(scripts.apply);
     rollbackCode.innerHTML = highlightSql(scripts.rollback);
-    setupBlock.hidden = false;
   }
-  return { render, showSetup };
+  return { render, showCompare };
 }

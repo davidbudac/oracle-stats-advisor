@@ -26,6 +26,13 @@ describe("setupScripts", () => {
     expect(rollback).toMatch(/did not say which preferences/);
   });
 
+  test("diff: the changed preferences with their old and new text, for the comparison table", () => {
+    const { diff, changed } = setupScripts(base, null);
+    expect(diff.map((d) => d.name)).toEqual(changed);
+    expect(diff[0]).toEqual({ name: "INCREMENTAL", before: "FALSE", after: "TRUE" });
+    expect(setupScripts({ ...base, ...RECOMMENDED }, null).diff).toEqual([]);
+  });
+
   test("placeholders without names, quotes doubled", () => {
     const { apply } = setupScripts({ ...DEFAULTS, owner: "O'HARA" }, null);
     expect(apply).toMatch(/SET_TABLE_PREFS\('O''HARA', 'TABLE', 'INCREMENTAL', 'TRUE'\)/);

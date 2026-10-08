@@ -16,6 +16,10 @@
       <span class="eyebrow">Oracle 19c · DBMS_STATS</span>
       <h1>Gather advisor</h1>
     </div>
+    <div class="views" id="views" role="group" aria-label="Show" hidden>
+      <button type="button" id="view-yours" aria-pressed="true">Your setup</button>
+      <button type="button" id="view-rec" aria-pressed="false">Recommended <span class="views-count" id="views-count"></span></button>
+    </div>
     <nav class="topnav" aria-label="Page">
       <a href="#describe">Describe</a>
       <a href="#result">Result</a>
@@ -53,6 +57,7 @@ INCREMENTAL = TRUE
         <p class="parsed" id="parsed" aria-live="polite"></p>
       </details>
 
+      <p class="view-note" id="view-note" hidden>This is the recommended setup applied to your table, shown read-only; the changed fields are marked. It follows your setup: <button type="button" class="btn tiny" id="view-back">Edit your setup</button></p>
       <form id="form" autocomplete="off" onsubmit="return false"></form>
       <p class="clamp" id="clamp" hidden aria-live="polite"></p>
     </section>
@@ -63,6 +68,12 @@ INCREMENTAL = TRUE
         <p class="verdict-line" id="verdict"></p>
         <p class="names-note" id="names-note">The statements below use <code>OWNER</code> and <code>TABLE</code> as placeholders. Fill in Owner and Table to replace them.</p>
       </header>
+
+      <section class="block" id="compare" hidden aria-labelledby="compare-h">
+        <h3 id="compare-h">Your setup and the recommended setup</h3>
+        <p class="lead" id="compare-note"></p>
+        <table class="resolved compare" id="compare-table"></table>
+      </section>
 
       <section class="block" aria-labelledby="reads-h">
         <h3 id="reads-h">What is read</h3>

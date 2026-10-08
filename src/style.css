@@ -110,6 +110,12 @@ small { font-size: 0.85em; }
 .topnav .btn { margin-inline-start: var(--sp-2); min-block-size: 2rem; padding-inline: var(--sp-3); }
 @media (max-width: 32rem) { .topnav a { padding-inline: var(--sp-2); } .topnav .btn { margin-inline-start: var(--sp-1); } }
 @media (hover: hover) and (pointer: fine) { .topnav a:hover { color: var(--ink); background: var(--sunk); } }
+.views { display: inline-flex; padding: 3px; gap: 2px; background: var(--sunk); border: 1px solid var(--rule); border-radius: calc(var(--r) + 3px); margin-inline: auto; }
+.views button { font: inherit; font-size: 0.8125rem; font-weight: 500; color: var(--ink-2); background: transparent; border: 0; border-radius: var(--r); min-block-size: 1.875rem; padding-inline: var(--sp-3); cursor: pointer; white-space: nowrap; transition: background-color 0.15s var(--ease), color 0.15s var(--ease); }
+.views button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px light-dark(oklch(0.2 0.02 265 / 0.12), oklch(0 0 none / 0.4)); }
+#view-rec[aria-pressed="true"] { color: var(--accent); }
+.views-count { color: var(--muted); font-weight: 400; }
+@media (hover: hover) and (pointer: fine) { .views button[aria-pressed="false"]:hover { color: var(--ink); } }
 .layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-5); padding: var(--sp-5) var(--gutter) var(--sp-6); max-inline-size: 90rem; inline-size: 100%; margin-inline: auto; }
 @media (min-width: 64rem) { .layout { grid-template-columns: minmax(23rem, 28rem) minmax(0, 1fr); align-items: start; } .form-pane { position: sticky; inset-block-start: calc(var(--bar-h) + var(--sp-4)); max-block-size: calc(100dvh - var(--bar-h) - 2rem); overflow: auto; scrollbar-width: thin; scrollbar-color: var(--rule-input) transparent; } }
 .pane { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--r-lg); box-shadow: var(--shadow); padding: var(--sp-5) clamp(1rem, 0.5rem + 2vw, 1.5rem) var(--sp-5); min-inline-size: 0; }
@@ -148,6 +154,12 @@ small { font-size: 0.85em; }
 .pair select { flex: 1; }
 .pair input { inline-size: 6rem; }
 .hint { color: var(--muted); font-weight: 400; }
+.view-note { background: var(--accent-soft); color: var(--ink); border-radius: var(--r); padding: var(--sp-3) var(--sp-4); font-size: 0.85rem; margin-block: 0 var(--sp-4); }
+.view-note .btn { margin-inline-start: var(--sp-1); vertical-align: middle; }
+/* a field the recommended setup changes: ringed in both views, so switching shows what moved */
+.diff { background: var(--accent-soft); box-shadow: 0 0 0 var(--sp-2) var(--accent-soft); border-radius: var(--r-sm); }
+.diff > span:first-child, .diff > label:first-child, .check.diff > span { color: var(--accent); }
+.is-rec .diff :is(input, select) { border-color: var(--accent); }
 .clamp { background: var(--c-warn-soft); color: var(--warn-ink); border-radius: var(--r); padding: var(--sp-3) var(--sp-4); font-size: 0.85rem; margin-block: var(--sp-4) 0; }
 [hidden] { display: none !important; }
 
@@ -223,6 +235,14 @@ small { font-size: 0.85em; }
 .src.default { color: var(--muted); font-weight: 400; }
 .src.ignored { color: var(--bad-ink); }
 .src.job { color: var(--muted); }
+.compare th[scope="row"] { font-size: 0.84rem; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--ink-2); }
+.compare { table-layout: fixed; }
+.compare thead th { inline-size: 36%; }
+.compare thead th:first-child { inline-size: 28%; }
+.compare .verdict { white-space: normal; }
+.compare thead th.on { color: var(--accent); }
+.compare td.on { background: var(--accent-soft); }
+.compare code { overflow-wrap: anywhere; }
 .findings { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--sp-2); }
 .finding { font-size: 0.9rem; padding: var(--sp-3) var(--sp-4); background: var(--sunk); border: 1px solid var(--rule); border-radius: var(--r); }
 .sqlgrid { display: grid; grid-template-columns: 1fr; gap: var(--sp-4); }

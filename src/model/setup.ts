@@ -30,7 +30,7 @@ export const PREF_OF_FIELD: Partial<Record<keyof Input, string>> = {
 
 export const COLUMN_PLACEHOLDER = "<column list>";
 
-export interface SetupScripts { apply: string; rollback: string; changed: string[] }
+export interface SetupScripts { apply: string; rollback: string; changed: string[]; diff: { name: string; before: string | null; after: string }[] }
 
 const stalenessOf = (p: Input) => [p.useStalePercent && "USE_STALE_PERCENT", p.useLockedStats && "USE_LOCKED_STATS", p.allowMixedFormat && "ALLOW_MIXED_FORMAT"].filter(Boolean) as string[];
 const sameStaleness = (a: Input, b: Input) => a.useStalePercent === b.useStalePercent && a.useLockedStats === b.useLockedStats && a.allowMixedFormat === b.allowMixedFormat;
@@ -110,5 +110,5 @@ export function setupScripts(before: Input, prov: Provenance | null): SetupScrip
   if (changed.length && before.partitioned) {
     rollback.push("", "-- Synopses built by a gather stay: they are harmless, and the next gather that touches a partition replaces its synopsis.");
   }
-  return { apply: apply.join("\n"), rollback: rollback.join("\n"), changed: changed.map((p) => p.name) };
+  return { apply: apply.join("\n"), rollback: rollback.join("\n"), changed: changed.map((p) => p.name), diff: changed.map(({ name, before, after }) => ({ name, before, after })) };
 }

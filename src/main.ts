@@ -33,6 +33,10 @@ let current: Input = { ...DEFAULTS };
 let lastHash: string | null = null;
 // what the last paste said beyond the form (exact preference texts, table-level list, histogram columns); null until a paste fills the form
 let loaded: Provenance | null = null;
+// "Use the recommended setup" opens a second view; the form keeps your setup and the recommended one is derived from it
+let recOpen = false;
+let view: "yours" | "rec" = "yours";
+const recommendedOf = (i: Input) => clampInput({ ...i, ...RECOMMENDED }).input;
 const result = createResult(document);
 const { ctl, applyVisibility } = buildForm($("#form"), (key) => update(key));
 
@@ -50,8 +54,18 @@ const writeState = (state: Input, raw?: Partial<Record<keyof Input, unknown>>) =
 
 function render(input: Input, clampNotes: string[]) {
   current = input;
-  applyVisibility(input);
-  result.render(advise(input), clampNotes, input);
+  const rec = recOpen ? recommendedOf(input) : null;
+  const shown = rec && view === "rec" ? rec : input;
+  applyVisibility(shown);
+  const outcome = advise(shown);
+  result.render(outcome, shown === input ? clampNotes : clampInput(shown).notes, shown);
+  if (rec) {
+    const yours = shown === input ? outcome : advise(input);
+    const scripts = setupScripts(input, loaded);
+    result.showCompare({ yours, rec: shown === rec ? outcome : advise(rec), scripts, loadedFromDb: loaded !== null, showing: view });
+    $("#views-count").textContent = scripts.changed.length ? `· ${scripts.changed.length} changed` : "· same";
+    for (const k of keys) ctl[k]?.wrap.classList.toggle("diff", input[k] !== rec[k]);
+  } else result.showCompare(null);
   const hash = encodeInput(input);
   if (hash !== lastHash) {
     lastHash = hash;
@@ -67,17 +81,34 @@ function update(edited?: keyof Input) {
   render(input, notes);
 }
 function apply(partial: Partial<Input>, edited?: keyof Input) {
+  if (view !== "yours") showView("yours", false);
   const { input } = clampInput({ ...current, ...partial }, edited);
   writeState(input);
   const { notes } = clampInput(input);
   render(input, notes);
 }
 
+/** Switch the form and the result between your setup and the recommended one; the form is editable only on your setup. */
+function showView(v: "yours" | "rec", draw = true) {
+  view = v;
+  $("#view-yours").setAttribute("aria-pressed", String(v === "yours"));
+  $("#view-rec").setAttribute("aria-pressed", String(v === "rec"));
+  $("#view-note").hidden = v === "yours";
+  $("#form").inert = v === "rec";
+  $("#form").classList.toggle("is-rec", v === "rec");
+  if (!draw) return;
+  writeState(v === "rec" ? recommendedOf(current) : current);
+  render(current, clampInput(current).notes);
+}
 $("#recommended").addEventListener("click", () => {
-  result.showSetup(setupScripts(current, loaded), loaded !== null);
-  apply({ ...RECOMMENDED });
-  $("#setup").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  recOpen = true;
+  $("#views").hidden = false;
+  showView("rec");
+  $("#compare").scrollIntoView({ behavior: "smooth", block: "nearest" });
 });
+$("#view-yours").addEventListener("click", () => showView("yours"));
+$("#view-rec").addEventListener("click", () => showView("rec"));
+$("#view-back").addEventListener("click", () => showView("yours"));
 $("#reset").addEventListener("click", () => { loaded = null; apply({ ...DEFAULTS, owner: current.owner, tableName: current.tableName }); });
 
 // ---- presets
