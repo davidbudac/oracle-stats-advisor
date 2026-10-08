@@ -23,7 +23,7 @@ export const emptyProvenance = (): Provenance => ({ tablePrefs: null, histogramC
 /** The preference each form field feeds; editing the field makes the pasted text of that preference stale. */
 export const PREF_OF_FIELD: Partial<Record<keyof Input, string>> = {
   incremental: "INCREMENTAL", incrementalLevel: "INCREMENTAL_LEVEL",
-  useStalePercent: "INCREMENTAL_STALENESS", useLockedStats: "INCREMENTAL_STALENESS", allowMixedFormat: "INCREMENTAL_STALENESS",
+  useStalePercent: "INCREMENTAL_STALENESS", useLockedStats: "INCREMENTAL_STALENESS", allowMixedFormat: "INCREMENTAL_STALENESS", ndvAlgorithm: "APPROXIMATE_NDV_ALGORITHM",
   publish: "PUBLISH", estimatePercent: "ESTIMATE_PERCENT", granularity: "GRANULARITY", methodOpt: "METHOD_OPT",
   overrides: "PREFERENCE_OVERRIDES_PARAMETER", cascade: "CASCADE", noInvalidate: "NO_INVALIDATE", options: "OPTIONS", degree: "DEGREE", stalePercent: "STALE_PERCENT",
 };

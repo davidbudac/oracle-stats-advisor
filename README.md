@@ -36,8 +36,9 @@ user who can read the `DBA_*` views and call `DBMS_STATS` (SQL*Plus, SQLcl or SQ
 SQL> @collect.sql SHOP SALES
 ```
 
-It is pure SQL: three `SELECT`s over the dictionary (plus one optional, error-tolerant block
-that flushes the DML counters). Paste the whole output into "Fill the form from your database":
+It is pure SQL: four `SELECT`s over the dictionary (the third reads one SYS table to tell whether
+the synopses are in step, and is skipped without the privilege), plus one optional, error-tolerant
+block that flushes the DML counters. Paste the whole output into "Fill the form from your database":
 every field is filled, including the owner, table and partition names used in the generated
 statements. Only the lines between `ADVISOR INPUT BEGIN` and `END` are read; an `ORA-` error in
 the middle (for example `REPORT_COL_USAGE` without the privilege) is skipped. The output ends with
@@ -68,7 +69,8 @@ SQL> @recommend.sql SHOP SALES
 
 - **A partitioned table under `GATHER_TABLE_STATS`**: INCREMENTAL and its four conditions
   (PUBLISH, AUTO_SAMPLE_SIZE, GRANULARITY, INCREMENTAL_LEVEL), partname and granularity,
-  staleness rules, locked partitions and tables, missing or out-of-step synopses, column usage
+  staleness rules, locked partitions and tables, missing, out-of-step or old-format synopses
+  (APPROXIMATE_NDV_ALGORITHM, ALLOW_MIXED_FORMAT), column usage
   under SIZE AUTO, column groups and new histograms, `PREFERENCE_OVERRIDES_PARAMETER`,
   `GATHER AUTO`. Every rule comes from a 19.27 lab log (`docs/lab-observations.md`) or the 19c
   documentation, cited per finding.

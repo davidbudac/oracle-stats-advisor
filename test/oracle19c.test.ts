@@ -99,7 +99,31 @@ describe("Oracle 19c documented semantics and collector integration", () => {
       expect(o.dryRun).toContain(arg);
     }
     expect(o.dryRun).toContain("VARIABLE advisor_report CLOB");
-    expect(o.dryRun).toContain("no OPTIONS parameter");
-    expect(o.dryRun).not.toContain("options =>");
+    expect(o.dryRun).toContain("options => 'GATHER AUTO'");
+    expect(o.dryRun).toMatch(/19\.27/);
+    expect(run({ runBy: "auto" }).dryRun).toMatch(/^SET LONG/);
+  });
+
+  test("old-format synopses are read once more without ALLOW_MIXED_FORMAT and merged with it", () => {
+    const parsed = parsePrefs("APPROXIMATE_NDV_ALGORITHM = REPEAT OR HYPERLOGLOG\nOLD_FORMAT_PARTITIONS = 3\nINCREMENTAL_STALENESS = USE_STALE_PERCENT");
+    expect(parsed.ignored).toEqual([]);
+    expect(parsed.values).toMatchObject({ ndvAlgorithm: "REPEAT OR HYPERLOGLOG", oldFormatPartitions: 3, allowMixedFormat: false });
+    expect(parsePrefs("APPROXIMATE_NDV_ALGORITHM = SOMETHING").ignored.length).toBe(1);
+    const inc: Partial<Input> = { incremental: "TRUE", synopses: "all", oldFormatPartitions: 3 };
+    const strict = run({ ...inc, allowMixedFormat: false });
+    expect(strict.partitionsRead).toBe(DEFAULTS.newPartitions + 3);
+    expect(strict.verdict[0]).toBe("warn");
+    expect(strict.fixes.join("\n")).toMatch(/'INCREMENTAL_STALENESS', 'ALLOW_MIXED_FORMAT'/);
+    expect(strict.next!.input.oldFormatPartitions).toBe(0);
+    expect(strict.next!.blocks).toBe(0);
+    expect(decodeInput(encodeInput(strict.input))).toMatchObject({ oldFormatPartitions: 3, allowMixedFormat: false });
+    const mixed = run({ ...inc, allowMixedFormat: true });
+    expect(mixed.partitionsRead).toBe(DEFAULTS.newPartitions);
+    expect(mixed.findings.some((f) => f.level === "info" && /adaptive-sampling/.test(f.text))).toBe(true);
+    expect(mixed.next!.input.oldFormatPartitions).toBe(3);
+    const legacy = run({ ...inc, ndvAlgorithm: "ADAPTIVE SAMPLING" });
+    expect(legacy.fixes.join("\n")).toMatch(/'APPROXIMATE_NDV_ALGORITHM', 'REPEAT OR HYPERLOGLOG'/);
+    expect(run({ ...job, oldFormatPartitions: 2, allowMixedFormat: false, tableChangePercent: 15, useTableChangePercent: true }).partitionsRead).toBe(2);
+    expect(run({ partitioned: false, oldFormatPartitions: 3 }).input.oldFormatPartitions).toBe(0);
   });
 });

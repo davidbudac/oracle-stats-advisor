@@ -6,8 +6,8 @@
 -- nothing is gathered, no preference is changed: the statements are printed, not run.
 --
 -- Run it in the PDB that owns the table, as a user who can read the DBA_* views and call
--- DBMS_STATS. Reports additionally need ownership or ANALYZE ANY (SYS objects need stronger
--- privileges); SELECT_CATALOG_ROLE + EXECUTE alone is not sufficient for every report.
+-- DBMS_STATS. REPORT_COL_USAGE (statement 2) additionally needs SYSDBA or ANALYZE ANY DICTIONARY
+-- plus ANALYZE ANY; it is skipped without. SELECT_CATALOG_ROLE + EXECUTE alone is not sufficient.
 -- Input owner/table names must be conventional unquoted identifiers.
 -- See docs/oracle19c-review.md for the review and remaining model limits.
 --
@@ -37,12 +37,17 @@
 --                                   on a column rereads every partition (lab E1, E3i): statement 2 lists
 --                                   the columns a pinned list would name
 --   INCREMENTAL_STALENESS           add USE_LOCKED_STATS when a locked partition had DML, else the global
---                                   statistics come from a full scan on every gather (lab C1, C2)
+--                                   statistics come from a full scan on every gather (lab C1, C2); add
+--                                   ALLOW_MIXED_FORMAT when a partition still has an 11g-format synopsis, else
+--                                   it counts as stale and is read again (19c reference)
+--   APPROXIMATE_NDV_ALGORITHM       REPEAT OR HYPERLOGLOG, the default, when ADAPTIVE SAMPLING is set: the 11g
+--                                   format is far larger than HyperLogLog
 --   PREFERENCE_OVERRIDES_PARAMETER  TRUE when the automatic job would gather new or stale partitions but
 --                                   leave the global statistics behind because the table as a whole is
 --                                   below STALE_PERCENT (lab G6, G7, Tb2); the alternative is one plain
 --                                   GATHER_TABLE_STATS after each load
---   NO_INVALIDATE                   AUTO_INVALIDATE: TRUE means existing cursors never see new statistics
+--   NO_INVALIDATE                   AUTO_INVALIDATE: TRUE leaves existing cursors on their plan until a later
+--                                   hard parse
 --   locks                           a locked table raises ORA-20005 and is skipped by the job (lab D1);
 --                                   a locked partition with DML or without a synopsis forces a full scan
 --                                   for the global statistics (lab C1, V2)
@@ -51,7 +56,7 @@
 -- FROM says where the value in force comes from: 'table' when DBA_TAB_STAT_PREFS has a row for this
 -- table (SET_TABLE_PREFS or SET_SCHEMA_PREFS), 'global' otherwise (SET_GLOBAL_PREFS or Oracle's default).
 --
--- Oracle 19c. Original version exercised 2026-10-08 on 19.27 (PDB1 of the dbmint lab: STATS_LAB.SALES, A1, E1, N2, N4, SHOPSALES and the plain ST1).
+-- Oracle 19c. Exercised 2026-10-08 on 19.27 (PDB1 of the dbmint lab: STATS_LAB.SALES, A1, C1, E1, N2, N4, SHOPSALES and the plain ST1).
 
 SET PAGESIZE 0 LINESIZE 32767 HEADING OFF FEEDBACK OFF VERIFY OFF TRIMOUT ON TRIMSPOOL ON TAB OFF
 SET LONG 1000000 LONGCHUNKSIZE 1000000
@@ -83,6 +88,7 @@ WITH p AS (
          DBMS_STATS.GET_PREFS('INCREMENTAL', tb.own, tb.tab)                    AS c_incremental,
          DBMS_STATS.GET_PREFS('INCREMENTAL_LEVEL', tb.own, tb.tab)              AS c_incr_level,
          DBMS_STATS.GET_PREFS('INCREMENTAL_STALENESS', tb.own, tb.tab)          AS c_incr_staleness,
+         DBMS_STATS.GET_PREFS('APPROXIMATE_NDV_ALGORITHM', tb.own, tb.tab)      AS c_ndv_alg,
          DBMS_STATS.GET_PREFS('PUBLISH', tb.own, tb.tab)                        AS c_publish,
          DBMS_STATS.GET_PREFS('ESTIMATE_PERCENT', tb.own, tb.tab)               AS c_estimate,
          DBMS_STATS.GET_PREFS('GRANULARITY', tb.own, tb.tab)                    AS c_granularity,
@@ -104,7 +110,18 @@ WITH p AS (
          CASE WHEN EXISTS (SELECT 1 FROM dba_part_col_statistics c
                            WHERE  c.owner = s.owner AND c.table_name = s.table_name AND c.partition_name = s.partition_name
                            AND   (c.notes LIKE '%HYPERLOGLOG%' OR c.notes LIKE '%ADAPTIVE_SAMPLING%'))
-              THEN 1 ELSE 0 END AS has_syn
+              THEN 1 ELSE 0 END AS has_syn,
+         CASE WHEN s.last_analyzed IS NOT NULL AND EXISTS (SELECT 1 FROM dba_stat_extensions e
+                           WHERE  e.owner = s.owner AND e.table_name = s.table_name
+                           AND    NOT EXISTS (SELECT 1 FROM dba_part_col_statistics c
+                                              WHERE  c.owner = s.owner AND c.table_name = s.table_name
+                                              AND    c.partition_name = s.partition_name AND c.column_name = e.extension_name
+                                              AND    c.last_analyzed IS NOT NULL))
+              THEN 1 ELSE 0 END AS lacks_ext,
+         CASE WHEN EXISTS (SELECT 1 FROM dba_part_col_statistics c
+                           WHERE  c.owner = s.owner AND c.table_name = s.table_name AND c.partition_name = s.partition_name
+                           AND    c.notes LIKE '%ADAPTIVE_SAMPLING%')
+              THEN 1 ELSE 0 END AS old_fmt
   FROM   tb
          JOIN dba_tab_statistics s ON s.owner = tb.own AND s.table_name = tb.tab AND s.object_type = 'PARTITION'
          LEFT JOIN dba_tab_modifications m ON m.table_owner = s.owner AND m.table_name = s.table_name
@@ -118,11 +135,13 @@ WITH p AS (
                   THEN 1 ELSE 0 END)                                                   AS n_stale,
          SUM(is_locked)                                                                AS n_locked,
          SUM(CASE WHEN is_locked = 1 AND mods > 0 THEN 1 ELSE 0 END)                    AS n_locked_chg,
-         SUM(CASE WHEN is_locked = 1 AND has_syn = 0 THEN 1 ELSE 0 END)  AS n_locked_nosyn,
-         SUM(CASE WHEN is_locked = 1 AND (has_syn = 0 OR
+         SUM(CASE WHEN is_locked = 1 AND (has_syn = 0 OR lacks_ext = 1) THEN 1 ELSE 0 END) AS n_locked_nosyn,
+         SUM(CASE WHEN is_locked = 1 AND (has_syn = 0 OR lacks_ext = 1 OR
                    (mods > 0 AND UPPER(NVL(pf.c_incr_staleness, 'x')) NOT LIKE '%USE_LOCKED_STATS%'))
                   THEN 1 ELSE 0 END)                                                   AS n_unlock,
          SUM(has_syn)                                                                  AS n_with_syn,
+         SUM(CASE WHEN is_locked = 0 AND is_new = 0 AND has_syn = 0 THEN 1 ELSE 0 END)    AS n_lack_syn,
+         SUM(old_fmt)                                                                  AS n_old_fmt,
          MAX(CASE WHEN is_locked = 1 THEN partition_name END)
            KEEP (DENSE_RANK LAST ORDER BY is_locked, CASE WHEN has_syn = 0 THEN 2 WHEN mods > 0 THEN 1 ELSE 0 END, partition_position) AS name_locked
   FROM   pr, pf
@@ -131,7 +150,7 @@ WITH p AS (
   SELECT pf.*,
          NVL(ag.n_parts, 1) AS n_parts, NVL(ag.n_new, 0) AS n_new, NVL(ag.n_stale, 0) AS n_stale,
          NVL(ag.n_locked, 0) AS n_locked, NVL(ag.n_locked_chg, 0) AS n_locked_chg, NVL(ag.n_locked_nosyn, 0) AS n_locked_nosyn,
-         NVL(ag.n_with_syn, 0) AS n_with_syn, ag.name_locked, NVL(ag.n_unlock, 0) AS unlock_count,
+         NVL(ag.n_with_syn, 0) AS n_with_syn, NVL(ag.n_lack_syn, 0) AS n_lack_syn, NVL(ag.n_old_fmt, 0) AS n_old_fmt, ag.name_locked, NVL(ag.n_unlock, 0) AS unlock_count,
          (SELECT COUNT(*) FROM dba_tab_col_statistics c WHERE c.owner = pf.own AND c.table_name = pf.tab
           AND c.histogram IS NOT NULL AND c.histogram <> 'NONE') AS n_hist,
          (SELECT COUNT(*) FROM dba_tab_pending_stats c WHERE c.owner = pf.own AND c.table_name = pf.tab) AS n_pending,
@@ -152,8 +171,11 @@ WITH p AS (
 ), g AS (
   SELECT f.*,
          CASE WHEN tbl_mods = 0 THEN 0 WHEN num_rows = 0 THEN 100 ELSE 100 * tbl_mods / num_rows END AS tbl_change,
+         -- the dictionary guess of collect.sql statement 1: a locked partition with DML or without a synopsis blanks the global NOTES
+         -- although the other synopses are in step (lab C1, Tc, V2); collect.sql statement 3 reads the synopsis table for the exact answer
          CASE WHEN n_with_syn = 0 THEN 'none'
               WHEN EXISTS (SELECT 1 FROM dba_tab_col_statistics c WHERE c.owner = f.own AND c.table_name = f.tab AND c.notes LIKE '%INCREMENTAL%') THEN 'all'
+              WHEN n_lack_syn = 0 AND (n_locked_chg > 0 OR n_locked_nosyn > 0) THEN 'all'
               ELSE 'stale' END AS synopses
   FROM   f
 ), r AS (
@@ -167,7 +189,11 @@ WITH p AS (
          CASE WHEN mo = 'size1' AND n_hist > 0 THEN 'FOR ALL COLUMNS SIZE AUTO'
               WHEN mo = 'repeat' AND n_hist = 0 THEN 'FOR ALL COLUMNS SIZE AUTO' END AS r_method_opt,
          CASE WHEN part = 1 AND n_locked_chg > 0 AND UPPER(NVL(c_incr_staleness, 'x')) NOT LIKE '%USE_LOCKED_STATS%'
-              THEN 'USE_STALE_PERCENT,USE_LOCKED_STATS,ALLOW_MIXED_FORMAT' END AS r_incr_staleness,
+              THEN 'USE_STALE_PERCENT,USE_LOCKED_STATS,ALLOW_MIXED_FORMAT'
+              WHEN part = 1 AND inc = 1 AND n_old_fmt > 0 AND UPPER(NVL(c_incr_staleness, 'x')) NOT LIKE '%ALLOW_MIXED_FORMAT%'
+              THEN CASE WHEN c_incr_staleness IS NULL OR UPPER(c_incr_staleness) = 'NULL' THEN 'ALLOW_MIXED_FORMAT'
+                        ELSE c_incr_staleness || ',ALLOW_MIXED_FORMAT' END END AS r_incr_staleness,
+         CASE WHEN part = 1 AND UPPER(c_ndv_alg) LIKE 'ADAPTIVE%' THEN 'REPEAT OR HYPERLOGLOG' END AS r_ndv_alg,
          CASE WHEN part = 1 AND ov = 0 AND n_new + n_stale > 0 AND tbl_change <= stale_pct THEN 'TRUE' END AS r_overrides,
          CASE WHEN tbl_lock IS NULL AND unlock_count > 0 THEN unlock_count END AS n_unlock,
          CASE WHEN UPPER(c_no_invalidate) = 'TRUE' THEN 'DBMS_STATS.AUTO_INVALIDATE' END AS r_no_invalidate,
@@ -192,7 +218,8 @@ FROM   lines l,
          CASE WHEN l.part = 1 THEN
            '-- partitions: ' || TO_CHAR(l.n_new) || ' without statistics, ' || TO_CHAR(l.n_stale) || ' stale by STALE_PERCENT, '
                || TO_CHAR(l.n_locked) || ' locked (' || TO_CHAR(l.n_locked_chg) || ' with DML, ' || TO_CHAR(l.n_locked_nosyn) || ' without synopsis)'
-               || ', synopses: ' || l.synopses END,
+               || ', synopses: ' || l.synopses
+               || CASE WHEN l.n_old_fmt > 0 THEN ', ' || TO_CHAR(l.n_old_fmt) || ' with an old-format (adaptive sampling) synopsis' END END,
          '-- FROM: table = a preference on this table (SET_TABLE_PREFS / SET_SCHEMA_PREFS); global = SET_GLOBAL_PREFS or the Oracle default',
          ' ',
          RPAD('SETTING', 31) || ' ' || RPAD('CURRENT', 36) || ' ' || RPAD('FROM', 7) || ' ' || 'RECOMMENDED',
@@ -200,6 +227,7 @@ FROM   lines l,
          RPAD('INCREMENTAL', 31) || ' ' || NVL(l.c_incremental, 'NULL') || RPAD(' ', GREATEST(36 - LENGTH(NVL(l.c_incremental, 'NULL')), 0)) || ' ' || RPAD(CASE WHEN ',' || l.tab_prefs || ',' LIKE '%,INCREMENTAL,%' THEN 'table' ELSE 'global' END, 7) || ' ' || NVL(l.r_incremental, l.c_incremental) || CASE WHEN l.r_incremental IS NOT NULL THEN '   <-- change' END,
          RPAD('INCREMENTAL_LEVEL', 31) || ' ' || NVL(l.c_incr_level, 'NULL') || RPAD(' ', GREATEST(36 - LENGTH(NVL(l.c_incr_level, 'NULL')), 0)) || ' ' || RPAD(CASE WHEN ',' || l.tab_prefs || ',' LIKE '%,INCREMENTAL_LEVEL,%' THEN 'table' ELSE 'global' END, 7) || ' ' || NVL(l.r_incr_level, l.c_incr_level) || CASE WHEN l.r_incr_level IS NOT NULL THEN '   <-- change' END,
          RPAD('INCREMENTAL_STALENESS', 31) || ' ' || NVL(l.c_incr_staleness, 'NULL') || RPAD(' ', GREATEST(36 - LENGTH(NVL(l.c_incr_staleness, 'NULL')), 0)) || ' ' || RPAD(CASE WHEN ',' || l.tab_prefs || ',' LIKE '%,INCREMENTAL_STALENESS,%' THEN 'table' ELSE 'global' END, 7) || ' ' || NVL(l.r_incr_staleness, NVL(l.c_incr_staleness, 'NULL')) || CASE WHEN l.r_incr_staleness IS NOT NULL THEN '   <-- change' END,
+         RPAD('APPROXIMATE_NDV_ALGORITHM', 31) || ' ' || NVL(l.c_ndv_alg, 'NULL') || RPAD(' ', GREATEST(36 - LENGTH(NVL(l.c_ndv_alg, 'NULL')), 0)) || ' ' || RPAD(CASE WHEN ',' || l.tab_prefs || ',' LIKE '%,APPROXIMATE_NDV_ALGORITHM,%' THEN 'table' ELSE 'global' END, 7) || ' ' || NVL(l.r_ndv_alg, NVL(l.c_ndv_alg, 'NULL')) || CASE WHEN l.r_ndv_alg IS NOT NULL THEN '   <-- change' END,
          RPAD('PUBLISH', 31) || ' ' || NVL(l.c_publish, 'NULL') || RPAD(' ', GREATEST(36 - LENGTH(NVL(l.c_publish, 'NULL')), 0)) || ' ' || RPAD(CASE WHEN ',' || l.tab_prefs || ',' LIKE '%,PUBLISH,%' THEN 'table' ELSE 'global' END, 7) || ' ' || NVL(l.r_publish, l.c_publish) || CASE WHEN l.r_publish IS NOT NULL THEN '   <-- change' END,
          RPAD('ESTIMATE_PERCENT', 31) || ' ' || NVL(l.c_estimate, 'NULL') || RPAD(' ', GREATEST(36 - LENGTH(NVL(l.c_estimate, 'NULL')), 0)) || ' ' || RPAD(CASE WHEN ',' || l.tab_prefs || ',' LIKE '%,ESTIMATE_PERCENT,%' THEN 'table' ELSE 'global' END, 7) || ' ' || NVL(l.r_estimate, l.c_estimate) || CASE WHEN l.r_estimate IS NOT NULL THEN '   <-- change' END,
          RPAD('GRANULARITY', 31) || ' ' || NVL(l.c_granularity, 'NULL') || RPAD(' ', GREATEST(36 - LENGTH(NVL(l.c_granularity, 'NULL')), 0)) || ' ' || RPAD(CASE WHEN ',' || l.tab_prefs || ',' LIKE '%,GRANULARITY,%' THEN 'table' ELSE 'global' END, 7) || ' ' || NVL(l.r_granularity, l.c_granularity) || CASE WHEN l.r_granularity IS NOT NULL THEN '   <-- change' END,
@@ -217,7 +245,7 @@ FROM   lines l,
          ' ',
          '-- Recommended changes, in this order (nothing below has been run):',
          CASE WHEN l.r_incremental IS NULL AND l.r_incr_level IS NULL AND l.r_publish IS NULL AND l.r_estimate IS NULL AND l.r_granularity IS NULL
-               AND l.r_method_opt IS NULL AND l.r_incr_staleness IS NULL AND l.r_overrides IS NULL AND l.r_no_invalidate IS NULL
+               AND l.r_method_opt IS NULL AND l.r_incr_staleness IS NULL AND l.r_ndv_alg IS NULL AND l.r_overrides IS NULL AND l.r_no_invalidate IS NULL
                AND l.tbl_lock IS NULL AND NVL(l.n_unlock, 0) = 0
               THEN '--   none: the preferences are as the advisor would set them' END,
          CASE WHEN l.r_incremental IS NOT NULL THEN
@@ -262,10 +290,18 @@ FROM   lines l,
                 ELSE '--   METHOD_OPT SIZE REPEAT on a table without histograms never builds one, however skewed a column is.' END
            || ' Set AUTO explicitly: the inherited global preference may also suppress histograms.' END,
          CASE WHEN l.r_incr_staleness IS NOT NULL THEN
-           'EXEC DBMS_STATS.SET_TABLE_PREFS(' || l.ot || ', ''INCREMENTAL_STALENESS'', ''USE_STALE_PERCENT,USE_LOCKED_STATS,ALLOW_MIXED_FORMAT'')' END,
-         CASE WHEN l.r_incr_staleness IS NOT NULL THEN
+           'EXEC DBMS_STATS.SET_TABLE_PREFS(' || l.ot || ', ''INCREMENTAL_STALENESS'', ''' || l.r_incr_staleness || ''')' END,
+         CASE WHEN l.r_incr_staleness IS NOT NULL AND l.n_locked_chg > 0 AND UPPER(NVL(l.c_incr_staleness, 'x')) NOT LIKE '%USE_LOCKED_STATS%' THEN
            '--   ' || TO_CHAR(l.n_locked_chg) || ' locked partition(s) had DML: without USE_LOCKED_STATS the synopsis cannot be refreshed and the global statistics'
            || ' come from a full scan on every gather. With it, their new rows are in no statistic.' END,
+         CASE WHEN l.r_incr_staleness IS NOT NULL AND l.n_old_fmt > 0 AND UPPER(NVL(l.c_incr_staleness, 'x')) NOT LIKE '%ALLOW_MIXED_FORMAT%' THEN
+           '--   ' || TO_CHAR(l.n_old_fmt) || ' partition(s) keep a synopsis in the 11g adaptive-sampling format and ALLOW_MIXED_FORMAT is off: Oracle treats them as'
+           || ' stale and reads them once more. With the flag (the default) both formats merge as they are.' END,
+         CASE WHEN l.r_ndv_alg IS NOT NULL THEN
+           'EXEC DBMS_STATS.SET_TABLE_PREFS(' || l.ot || ', ''APPROXIMATE_NDV_ALGORITHM'', ''REPEAT OR HYPERLOGLOG'')' END,
+         CASE WHEN l.r_ndv_alg IS NOT NULL THEN
+           '--   APPROXIMATE_NDV_ALGORITHM ADAPTIVE SAMPLING writes every synopsis in the 11g format, far larger than HyperLogLog and slower to merge;'
+           || ' the default writes new ones in HyperLogLog form.' END,
          CASE WHEN l.r_overrides IS NOT NULL THEN
            'EXEC DBMS_STATS.SET_TABLE_PREFS(' || l.ot || ', ''PREFERENCE_OVERRIDES_PARAMETER'', ''TRUE'')' END,
          CASE WHEN l.r_overrides IS NOT NULL THEN
@@ -294,6 +330,9 @@ FROM   lines l,
          CASE WHEN l.part = 1 AND l.inc = 1 AND l.r_incr_level IS NULL AND l.r_publish IS NULL AND l.r_estimate IS NULL AND l.synopses <> 'all' THEN
            '--   note: the synopses are ' || CASE WHEN l.synopses = 'none' THEN 'not built yet' ELSE 'out of step with the statistics' END
            || ': the next gather reads every unlocked partition once to build them, then only what changed.' END,
+         CASE WHEN l.part = 1 AND l.n_old_fmt > 0 AND l.r_incr_staleness IS NULL AND UPPER(NVL(l.c_ndv_alg, 'x')) LIKE 'REPEAT%' THEN
+           '--   note: ' || TO_CHAR(l.n_old_fmt) || ' partition(s) keep an old-format (adaptive sampling) synopsis; REPEAT OR HYPERLOGLOG keeps that format even when the'
+           || ' partition is re-gathered. APPROXIMATE_NDV_ALGORITHM HYPERLOGLOG converts each as it is re-gathered, at no extra cost.' END,
          CASE WHEN l.part = 1 AND l.mo = 'auto' AND (l.inc = 1 OR l.r_incremental IS NOT NULL) THEN
            '--   note: under METHOD_OPT SIZE AUTO the first predicate on a column rereads every partition for its histogram; the column usage below lists the candidates'
            || ' for a pinned list (FOR ALL COLUMNS SIZE 1 FOR COLUMNS SIZE 254 <columns>).' END
@@ -333,7 +372,8 @@ WITH p AS (
   CONNECT BY LEVEL <= REGEXP_COUNT(r.rep, '^\s*\d+\.\s+\S+\s*:', 1, 'm')
 ), x AS (
   SELECT COUNT(u.col) AS n_used,
-         LISTAGG(CASE WHEN NVL(c.histogram, 'NONE') <> 'NONE' THEN u.col END, ',') WITHIN GROUP (ORDER BY u.col) AS with_hist,
+         LISTAGG(CASE WHEN NVL(c.histogram, 'NONE') <> 'NONE' AND NVL(c.notes, 'x') NOT LIKE '%HIST_FOR_INCREM_STATS%' THEN u.col END, ',') WITHIN GROUP (ORDER BY u.col) AS with_hist,
+         LISTAGG(CASE WHEN NVL(c.histogram, 'NONE') <> 'NONE' AND c.notes LIKE '%HIST_FOR_INCREM_STATS%' THEN u.col END, ',') WITHIN GROUP (ORDER BY u.col) AS support_hist,
          LISTAGG(CASE WHEN NVL(c.histogram, 'NONE') = 'NONE'
                       AND NOT (c.num_distinct IS NOT NULL AND t.num_rows IS NOT NULL AND c.num_distinct >= t.num_rows)
                       THEN u.col END, ',') WITHIN GROUP (ORDER BY u.col) AS candidates
@@ -346,6 +386,7 @@ FROM   x,
        TABLE(sys.odcivarchar2list(
          '--   column usage: ' || CASE WHEN x.n_used = 0 THEN 'none recorded, so SIZE AUTO builds no histogram yet' ELSE TO_CHAR(x.n_used) || ' column(s) used in predicates' END,
          CASE WHEN x.with_hist IS NOT NULL THEN '--   columns with a histogram today: ' || x.with_hist END,
+         CASE WHEN x.support_hist IS NOT NULL THEN '--   histograms kept only for incremental statistics (NOTES HIST_FOR_INCREM_STATS, not used by the optimizer; pinning them makes them real ones): ' || x.support_hist END,
          CASE WHEN x.candidates IS NOT NULL THEN '--   used in predicates, no histogram yet (a SIZE AUTO gather may build one): ' || x.candidates END,
          CASE WHEN x.with_hist IS NOT NULL OR x.candidates IS NOT NULL THEN
            '--   pinned list template: FOR ALL COLUMNS SIZE 1 FOR COLUMNS SIZE 254 ' || TRIM(',' FROM NVL(x.with_hist, '') || ',' || NVL(x.candidates, '')) END

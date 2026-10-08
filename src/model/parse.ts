@@ -14,8 +14,9 @@ const ALIASES: Record<string, string> = {
   estimate_percent: "ESTIMATE_PERCENT", granularity: "GRANULARITY", method_opt: "METHOD_OPT",
   stale_percent: "STALE_PERCENT", preference_overrides_parameter: "PREFERENCE_OVERRIDES_PARAMETER", overrides: "PREFERENCE_OVERRIDES_PARAMETER",
   cascade: "CASCADE", no_invalidate: "NO_INVALIDATE", options: "OPTIONS", degree: "DEGREE",
+  approximate_ndv_algorithm: "APPROXIMATE_NDV_ALGORITHM",
 };
-const UNMODELLED = new Set(["AUTOSTATS_TARGET", "APPROXIMATE_NDV_ALGORITHM", "TABLE_CACHED_BLOCKS", "AUTO_STAT_EXTENSIONS",
+const UNMODELLED = new Set(["AUTOSTATS_TARGET", "TABLE_CACHED_BLOCKS", "AUTO_STAT_EXTENSIONS",
   "GLOBAL_TEMP_TABLE_STATS", "WAIT_TIME_TO_UPDATE_STATS", "ROOT_TRIGGER_PDB", "JOB_OVERHEAD", "JOB_OVERHEAD_PERC", "CONCURRENT", "AUTO_TASK_STATUS",
   "AUTO_TASK_MAX_RUN_TIME", "AUTO_TASK_INTERVAL", "INCREMENTAL_INTERNAL_CONTROL", "NDV_ALGORITHM", "SCAN_RATE", "MAXIMUM_AUTO_SAMPLE_PERCENT", "STAT_CATEGORY", "COORDINATOR_TRIGGER_SHARD"]);
 const canonical = (name: string): string | null => ALIASES[String(name).trim().toLowerCase()] ?? null;
@@ -32,7 +33,7 @@ const FORM_KEYS: Record<string, [keyof Input, Kind]> = {
   NEW_PARTITIONS: ["newPartitions", "number"], CHANGED_PARTITIONS: ["changedPartitions", "number"], CHANGE_PERCENT: ["changePercent", "number"],
   TABLE_CHANGE_PERCENT: ["tableChangePercent", "number"], LOCKED_PARTITIONS: ["lockedPartitions", "number"],
   LOCKED_CHANGED: ["lockedChanged", "number"], SYNOPSES: ["synopses", "option"], TABLE_STATS: ["tableStats", "option"], COLUMN_CHANGE: ["columnChange", "option"],
-  LOCKED_NO_SYNOPSIS: ["lockedNoSynopsis", "flag"], TABLE_LOCKED: ["tableLocked", "flag"],
+  LOCKED_NO_SYNOPSIS: ["lockedNoSynopsis", "flag"], TABLE_LOCKED: ["tableLocked", "flag"], OLD_FORMAT_PARTITIONS: ["oldFormatPartitions", "number"],
 };
 
 type Values = Partial<Record<keyof Input, unknown>>;
@@ -127,6 +128,12 @@ function applyPref(name: string, raw: unknown, values: Values, notes: string[]):
       values.options = c;
       return { ok: true };
     }
+    case "APPROXIMATE_NDV_ALGORITHM": {
+      const a = /ADAPTIVE/.test(u) ? "ADAPTIVE SAMPLING" : /REPEAT/.test(u) ? "REPEAT OR HYPERLOGLOG" : /HYPERLOGLOG/.test(u) ? "HYPERLOGLOG" : null;
+      if (!a) return { ok: false, reason: "expected REPEAT OR HYPERLOGLOG, ADAPTIVE SAMPLING or HYPERLOGLOG" };
+      values.ndvAlgorithm = a;
+      return { ok: true };
+    }
     case "DEGREE":
       values.degree = v === "" ? "NULL" : v.slice(0, NAME_MAX);
       return { ok: true };
@@ -192,7 +199,7 @@ export function parsePrefs(text: string | null | undefined): Parsed {
   });
 
   const lines = rest.split(/\r?\n/);
-  const noise = /^(SQL>|PL\/SQL procedure|\d+ rows? selected|no rows selected|Elapsed:|\/$|BEGIN$|END;?$|DECLARE$|--|ORA-\d+|ERROR at line|Enter value for|old\s+\d+:|new\s+\d+:|\*$)/i;
+  const noise = /^(SQL>|PL\/SQL procedure|\d+ rows? selected|no rows selected|Elapsed:|\/$|BEGIN$|END;?$|DECLARE$|--|ORA-\d+|ERROR at line|Enter value for|old\s+\d+:|new\s+\d+:|\*$|\(?(SELECT|FROM|WHERE|WITH|JOIN|LEFT|CONNECT|GROUP|ORDER|AND|ON)\s)/i; // the last group: the SQL line SQL*Plus echoes under an error
   const columns = (dl: string) => [...dl.matchAll(/-+/g)].map((m) => ({ start: m.index ?? 0 }));
   const slices = (cols: { start: number }[], line: string) => cols.map((c, i) => line.slice(c.start, i + 1 < cols.length ? cols[i + 1]!.start : undefined).trim());
 

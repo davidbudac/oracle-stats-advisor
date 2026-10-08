@@ -131,7 +131,7 @@ INCREMENTAL = TRUE
           <li><b>Partition exchange.</b> The gather after an exchange reads nothing only if the empty partition was gathered first, the staging table has a table-level synopsis (INCREMENTAL TRUE, INCREMENTAL_LEVEL TABLE) and both sides have the same histograms. Model the staging table as a plain table here.</li>
           <li><b>Degree and concurrency</b> change how long a gather takes, not what it reads. They are shown, not modelled.</li>
           <li><b>Real-time and high-frequency statistics, online statistics for loads</b> are other mechanisms; this page models one gather and the nightly job.</li>
-          <li><b>Other patch levels.</b> Lab observations are from 19.27 and may vary across 19c release updates. REPORT_GATHER_TABLE_STATS reports affected objects without collecting statistics; it does not measure physical reads. Its 19c signature has no OPTIONS argument, so a GATHER AUTO call cannot be reproduced exactly by this table report.</li>
+          <li><b>Other patch levels.</b> Lab observations are from 19.27 and may vary across 19c release updates. REPORT_GATHER_TABLE_STATS reports affected objects without collecting statistics; it does not measure physical reads. The 19c reference omits its OPTIONS argument, but 19.27 accepts <code>options =&gt; 'GATHER AUTO'</code>, so the dry run passes the call's options through.</li>
         </ul>
       </details>
     </section>

@@ -18,6 +18,7 @@ export const OPTIONS = {
   noInvalidate: ["AUTO_INVALIDATE", "FALSE", "TRUE"],
   options: ["GATHER", "GATHER AUTO"],
   overrides: ["TRUE", "FALSE"],
+  ndvAlgorithm: ["REPEAT OR HYPERLOGLOG", "ADAPTIVE SAMPLING", "HYPERLOGLOG"],
   runBy: ["call", "auto"],
   partname: ["none", "new", "changed"],
   callGranularity: ["none", ...GRANULARITIES],
@@ -33,7 +34,7 @@ export type OptionKey = keyof typeof OPTIONS;
 
 export const NUMBERS = [
   "partitions", "blocksPerPartition", "numRows", "columnCount", "indexCount", "localIndexCount",
-  "stalePercent", "changePercent", "tableChangePercent", "newPartitions", "changedPartitions", "lockedPartitions", "lockedChanged",
+  "stalePercent", "changePercent", "tableChangePercent", "newPartitions", "changedPartitions", "lockedPartitions", "lockedChanged", "oldFormatPartitions",
 ] as const;
 export type NumberKey = (typeof NUMBERS)[number];
 
@@ -73,6 +74,7 @@ export interface Input {
   useStalePercent: boolean;
   useLockedStats: boolean;
   allowMixedFormat: boolean;
+  ndvAlgorithm: "REPEAT OR HYPERLOGLOG" | "ADAPTIVE SAMPLING" | "HYPERLOGLOG";
   publish: "TRUE" | "FALSE";
   estimatePercent: Percent;
   granularity: Granularity;
@@ -105,6 +107,7 @@ export interface Input {
   lockedPartitions: number;
   lockedChanged: number;
   lockedNoSynopsis: boolean;
+  oldFormatPartitions: number;
   tableLocked: boolean;
   columnChange: "none" | "usage" | "group" | "histogram";
 }
@@ -130,6 +133,7 @@ export const DEFAULTS: Readonly<Input> = Object.freeze({
   useStalePercent: false,
   useLockedStats: false,
   allowMixedFormat: true,
+  ndvAlgorithm: "REPEAT OR HYPERLOGLOG",
   publish: "TRUE",
   estimatePercent: "auto",
   granularity: "AUTO",
@@ -160,6 +164,7 @@ export const DEFAULTS: Readonly<Input> = Object.freeze({
   lockedPartitions: 0,
   lockedChanged: 0,
   lockedNoSynopsis: false,
+  oldFormatPartitions: 0,
   tableLocked: false,
   columnChange: "none",
 });
@@ -193,6 +198,7 @@ export const PREF_DEFAULTS = {
   INCREMENTAL: "FALSE",
   INCREMENTAL_LEVEL: "PARTITION",
   INCREMENTAL_STALENESS: "ALLOW_MIXED_FORMAT",
+  APPROXIMATE_NDV_ALGORITHM: "REPEAT OR HYPERLOGLOG",
   PREFERENCE_OVERRIDES_PARAMETER: "FALSE",
 } as const;
 
@@ -209,13 +215,13 @@ export const FIELD_LABELS: Record<keyof Input, string> = {
   partitioned: "Partitioned", partitions: "Partitions", blocksPerPartition: "Blocks per partition", numRows: "Rows", columnCount: "Columns",
   indexCount: "Indexes", localIndexCount: "Local indexes", histogramsPresent: "Histograms exist today", columnUsageRecorded: "Column usage recorded",
   incremental: "INCREMENTAL", incrementalLevel: "INCREMENTAL_LEVEL", useStalePercent: "USE_STALE_PERCENT", useLockedStats: "USE_LOCKED_STATS",
-  allowMixedFormat: "ALLOW_MIXED_FORMAT", publish: "PUBLISH", estimatePercent: "ESTIMATE_PERCENT", granularity: "GRANULARITY", methodOpt: "METHOD_OPT",
+  allowMixedFormat: "ALLOW_MIXED_FORMAT", ndvAlgorithm: "APPROXIMATE_NDV_ALGORITHM", publish: "PUBLISH", estimatePercent: "ESTIMATE_PERCENT", granularity: "GRANULARITY", methodOpt: "METHOD_OPT",
   cascade: "CASCADE", noInvalidate: "NO_INVALIDATE", options: "OPTIONS", degree: "DEGREE", stalePercent: "STALE_PERCENT", overrides: "PREFERENCE_OVERRIDES_PARAMETER",
   runBy: "Run by", partname: "partname", callGranularity: "granularity", callEstimatePercent: "estimate_percent", callMethodOpt: "method_opt",
   callCascade: "cascade", callNoInvalidate: "no_invalidate", callOptions: "options", callBlockSample: "block_sample => TRUE", force: "force => TRUE",
   synopses: "Synopses", tableStats: "Statistics today", tableChangePercent: "Rows changed since the last gather", useTableChangePercent: "Use measured table change", newPartitions: "New partitions", changedPartitions: "Changed partitions",
   changePercent: "Change per partition", lockedPartitions: "Locked partitions", lockedChanged: "Locked partitions with DML",
-  lockedNoSynopsis: "Locked partition without synopsis", tableLocked: "LOCK_TABLE_STATS", columnChange: "Column change",
+  lockedNoSynopsis: "Locked partition without synopsis", oldFormatPartitions: "Partitions with an old-format synopsis", tableLocked: "LOCK_TABLE_STATS", columnChange: "Column change",
 };
 
 /** Ready-made situations. Each is applied on top of DEFAULTS. */
@@ -223,7 +229,7 @@ export interface Preset { id: string; label: string; blurb: string; values: Part
 export const PRESETS: readonly Preset[] = [
   { id: "untouched", label: "Untouched partitioned table", blurb: "Oracle's defaults on a 24-partition table after one new month was loaded.", values: {} },
   { id: "recommended", label: "Chapter 8 recommended setup", blurb: "INCREMENTAL, staleness by percent, pinned histograms, the override on; every partition has a synopsis.", values: { ...RECOMMENDED } },
-  { id: "flat", label: "Plain (non-partitioned) table", blurb: "A 1,000,000-row table of 18,000 blocks, six indexes' worth of work left to CASCADE.", values: { partitioned: false, blocksPerPartition: 18000, numRows: 1000000, columnCount: 9, indexCount: 4, localIndexCount: 0, newPartitions: 0, tableChangePercent: 0.4 } },
+  { id: "flat", label: "Plain (non-partitioned) table", blurb: "A 1,000,000-row table of 18,000 blocks, four indexes' worth of work left to CASCADE.", values: { partitioned: false, blocksPerPartition: 18000, numRows: 1000000, columnCount: 9, indexCount: 4, localIndexCount: 0, newPartitions: 0, tableChangePercent: 0.4 } },
   { id: "legacy", label: "A 10g-era script on a plain table", blurb: "estimate_percent => 10, FOR ALL COLUMNS SIZE 1, cascade => TRUE.", values: { partitioned: false, blocksPerPartition: 18000, numRows: 1000000, columnCount: 9, indexCount: 4, localIndexCount: 0, newPartitions: 0, callEstimatePercent: 10, callMethodOpt: "size1", callCascade: "TRUE" } },
   { id: "firstinc", label: "First incremental gather", blurb: "INCREMENTAL just switched on: no synopses exist yet.", values: { incremental: "TRUE", synopses: "none", newPartitions: 0 } },
   { id: "locked", label: "Locked month with late DML", blurb: "One closed month locked, then corrected; default staleness.", values: { ...RECOMMENDED, useLockedStats: false, overrides: "FALSE", lockedPartitions: 1, lockedChanged: 1 } },

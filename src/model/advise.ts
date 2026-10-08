@@ -20,10 +20,11 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
   const { input: p, notes: clampNotes } = clampInput(raw);
   const flat = !p.partitioned;
   const N = p.partitions, B = p.blocksPerPartition, T = N * B;
-  const NEW = p.newPartitions, CHG = p.changedPartitions, LCK = p.lockedPartitions, LCKCHG = p.lockedChanged;
+  const NEW = p.newPartitions, CHG = p.changedPartitions, LCK = p.lockedPartitions, LCKCHG = p.lockedChanged, OLD = p.oldFormatPartitions;
   const U = N - LCK;
   const isInc = isTrue(p.incremental), ov = isTrue(p.overrides), pubOn = isTrue(p.publish);
   const S = p.synopses;
+  const stalenessFlags = [p.useStalePercent && "USE_STALE_PERCENT", p.useLockedStats && "USE_LOCKED_STATS", p.allowMixedFormat && "ALLOW_MIXED_FORMAT"].filter(Boolean).join(",");
   const auto = p.runBy === "auto";
 
   const findings: Finding[] = [];
@@ -86,8 +87,8 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
   if (!flat || isInc) prefRow("INCREMENTAL", "INCREMENTAL", p.incremental);
   if (isInc) {
     prefRow("INCREMENTAL_LEVEL", "INCREMENTAL_LEVEL", p.incrementalLevel);
-    const flags = [p.useStalePercent && "USE_STALE_PERCENT", p.useLockedStats && "USE_LOCKED_STATS", p.allowMixedFormat && "ALLOW_MIXED_FORMAT"].filter(Boolean).join(",");
-    prefRow("INCREMENTAL_STALENESS", "INCREMENTAL_STALENESS", flags || "NULL");
+    prefRow("INCREMENTAL_STALENESS", "INCREMENTAL_STALENESS", stalenessFlags || "NULL");
+    prefRow("APPROXIMATE_NDV_ALGORITHM", "APPROXIMATE_NDV_ALGORITHM", p.ndvAlgorithm);
   }
   prefRow("PREFERENCE_OVERRIDES_PARAMETER", "PREFERENCE_OVERRIDES_PARAMETER", p.overrides);
 
@@ -108,17 +109,17 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
   const sql = auto
     ? `-- The automatic optimizer statistics collection: GATHER_DATABASE_STATS (auto) with\n-- OPTIONS => 'GATHER AUTO' and no other parameter. The nearest call you can run yourself:\nEXEC DBMS_STATS.GATHER_SCHEMA_STATS(${lit(p.owner, "OWNER")}, options => 'GATHER AUTO')`
     : !args.length || oneLine.length <= 96 ? oneLine : `BEGIN\n  ${head.slice(5)},\n${args.map((a) => `    ${a}`).join(",\n")});\nEND;\n/`;
-  // The 19c reporting signature has no OPTIONS argument. BOOLEAN arguments need PL/SQL.
-  const reportArgs = args.filter((a) => !a.startsWith("options =>"));
+  // BOOLEAN arguments need PL/SQL. On 19.27 REPORT_GATHER_TABLE_STATS also takes options => (ALL_ARGUMENTS
+  // lists it, a call with GATHER AUTO runs) although the 19c reference omits it, so the call is passed as is.
   const dryRun = auto
-    ? "SELECT DBMS_STATS.REPORT_GATHER_AUTO_STATS(detail_level => 'TYPICAL', format => 'TEXT') FROM dual;"
+    ? ["SET LONG 1000000 LONGCHUNKSIZE 1000000", "SELECT DBMS_STATS.REPORT_GATHER_AUTO_STATS(detail_level => 'TYPICAL', format => 'TEXT') FROM dual;"].join("\n")
     : [
-      ...(opts === "GATHER AUTO" ? ["-- Oracle 19c REPORT_GATHER_TABLE_STATS has no OPTIONS parameter; this reports ordinary GATHER scope."] : []),
+      ...(givenO ? ["-- options => is accepted by REPORT_GATHER_TABLE_STATS on 19.27 although the 19c reference omits it; drop it if your release update rejects it."] : []),
       "SET LONG 1000000 LONGCHUNKSIZE 1000000",
       "VARIABLE advisor_report CLOB",
       "BEGIN",
       `  :advisor_report := DBMS_STATS.REPORT_GATHER_TABLE_STATS(${OT},`,
-      ...reportArgs.map((a) => `    ${a},`),
+      ...args.map((a) => `    ${a},`),
       "    detail_level => 'TYPICAL', format => 'TEXT');",
       "END;", "/", "PRINT advisor_report",
     ].join("\n");
@@ -159,6 +160,31 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
   const readNamed = () => {
     if (partname === "new") { read.newParts = 1; left.newParts = NEW - 1; } else { read.changedParts = 1; left.changedParts = CHG - 1; }
   };
+  // Synopses in the adaptive-sampling format of 11g and 12.1 (partition NOTES ADAPTIVE_SAMPLING). 19c writes new ones
+  // in HyperLogLog form by default and merges the two formats only under ALLOW_MIXED_FORMAT; without it the old-format
+  // partitions count as stale and are read once more. From the 19c reference: the lab has no old-format synopses.
+  let oldFormatReread = 0;
+  const formatNotes = () => {
+    const basis = "19c DBMS_STATS reference (APPROXIMATE_NDV_ALGORITHM, INCREMENTAL_STALENESS); inferred, not observed";
+    if (p.ndvAlgorithm === "ADAPTIVE SAMPLING") {
+      add("warn", "APPROXIMATE_NDV_ALGORITHM is ADAPTIVE SAMPLING: every synopsis is written in the 11g format, far larger than HyperLogLog and slower to merge. The default, REPEAT OR HYPERLOGLOG, writes new synopses in HyperLogLog form.", basis);
+      fixAt(7, sp("APPROXIMATE_NDV_ALGORITHM", "REPEAT OR HYPERLOGLOG"));
+    }
+    if (OLD <= 0 || S !== "all") return;
+    const one = OLD === 1;
+    if (!p.allowMixedFormat) {
+      if (!named) {
+        const already = read.newParts + read.changedParts + read.otherParts;
+        oldFormatReread = Math.max(0, Math.min(OLD, U - already));
+        read.otherParts += oldFormatReread;
+      }
+      add("warn", `${plural(OLD, "partition")} still ${one ? "has" : "have"} a synopsis in the old adaptive-sampling format and INCREMENTAL_STALENESS lacks ALLOW_MIXED_FORMAT, so Oracle treats ${one ? "it" : "them"} as stale: ${named ? "the next plain gather reads them" : one ? "it is read" : "they are read"} once more and ${one ? "gets a HyperLogLog synopsis" : "get HyperLogLog synopses"}. One-off. ALLOW_MIXED_FORMAT, the default, avoids the reread: the old synopses are then merged as they are.`, basis);
+      fixAt(7, sp("INCREMENTAL_STALENESS", `${stalenessFlags ? `${stalenessFlags},` : ""}ALLOW_MIXED_FORMAT`));
+      setVerdict("warn", "One-off reread of the old-format partitions");
+    } else {
+      add("info", `${plural(OLD, "partition")} ${one ? "keeps" : "keep"} a synopsis in the old adaptive-sampling format. ALLOW_MIXED_FORMAT lets ${one ? "it" : "them"} merge with the HyperLogLog ones, so nothing is read for ${one ? "it" : "them"}. ${p.ndvAlgorithm === "HYPERLOGLOG" ? "Each is rewritten in HyperLogLog form when its partition is next re-gathered." : p.ndvAlgorithm === "ADAPTIVE SAMPLING" ? "New synopses are written in the old format too." : "REPEAT OR HYPERLOGLOG keeps the old format even when the partition is re-gathered; APPROXIMATE_NDV_ALGORITHM HYPERLOGLOG converts each as it is re-gathered, at no extra cost."}`, basis);
+    }
+  };
   let gathered = true; // whether the table statistics are written at all (false: ORA-20005, skipped by the job, nothing to do)
   let basicKept = false; // GATHER AUTO after a load: the basic statistics stay as they are
 
@@ -187,6 +213,8 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
         ...p, runBy: p.runBy, partname: "none", callGranularity: "none", callEstimatePercent: "none", callMethodOpt: "none", callCascade: "none", callNoInvalidate: "none", callOptions: "none",
         callBlockSample: false, force: false, columnChange: "none",
         newPartitions: left.newParts + left.lack, changedPartitions: left.changedParts, lockedNoSynopsis: o.lockedNoSynopsisAfter,
+        // old-format synopses are rewritten only when Oracle must not merge formats; under ALLOW_MIXED_FORMAT they stay
+        oldFormatPartitions: published && !p.allowMixedFormat && p.ndvAlgorithm !== "ADAPTIVE SAMPLING" ? Math.max(0, OLD - Math.min(OLD, o.partitionsRead)) : OLD,
         synopses: o.synopsesAfter === "all" || o.synopsesAfter === "partial" ? "all" : o.synopsesAfter === "table" || o.synopsesAfter === "na" ? (flat ? S : "none") : o.synopsesAfter,
         tableStats: globalPublished ? "gathered" : p.tableStats,
         tableChangePercent: globalPublished ? 0 : p.tableChangePercent,
@@ -383,6 +411,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
         const synOk = !(LCKCHG > 0 && !p.useLockedStats) && !p.lockedNoSynopsis && !(LCK > 0 && S !== "all");
         if (synOk) {
           o.global = "merged"; o.globalNotes = "INCREMENTAL"; o.synopsesAfter = "all";
+          formatNotes();
           setVerdict("good", `Incremental: the job reads ${fmt(read.newParts + read.changedParts + read.otherParts)} of ${fmt(N)} partitions, merges the rest`);
           add("good", `${noStats ? "Global statistics are missing" : tableStale ? `The table is stale as a whole (${pct(tableChange / 100)} changed)` : "PREFERENCE_OVERRIDES_PARAMETER is TRUE"}, so a global refresh is expected, merged from synopses without another table scan.`, "lab T1, G8, G9, Tb2; inferred for the nightly job");
         } else {
@@ -620,6 +649,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
     else if (p.useStalePercent && staleChg) add("info", `The ${plural(CHG, "changed partition")} changed by more than STALE_PERCENT (${fmt(p.stalePercent, 4)}%), so ${CHG === 1 ? "it is" : "they are"} read.`, "lab B3, B3b");
     else if (p.useStalePercent && !staleChg) add("warn", `The ${plural(CHG, "changed partition")} changed by ${pct(p.changePercent / 100)}, below STALE_PERCENT (${fmt(p.stalePercent, 4)}%): not read. The global row count lags the table by these changes until they cross the threshold.`, "lab B2");
   }
+  formatNotes();
 
   // 4.2 column changes
   const cc = p.columnChange;
@@ -661,7 +691,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
     fixAt(8, "-- gather, then lock the partition again if you want it frozen");
   }
   if (reasons.includes("nosyn")) {
-    add("bad", `${inferredLockedNoSyn ? "A locked partition cannot get a synopsis, and the table has none yet" : "A locked partition has no synopsis (statistics copied in, then locked)"}, so the global statistics come from a scan of the whole table (${fmt(T)} blocks) on every gather, with or without USE_LOCKED_STATS.${tail}`, inferredLockedNoSyn ? "inferred, not observed; lab V2, Tl for the copied-statistics case" : "lab V2, Tl");
+    add("bad", `${inferredLockedNoSyn ? "A locked partition cannot get a synopsis, and the table has none yet" : "A locked partition has no synopsis, or none for a column group (statistics copied in and locked, or a column group added after the lock)"}, so the global statistics come from a scan of the whole table (${fmt(T)} blocks) on every gather, with or without USE_LOCKED_STATS.${tail}`, inferredLockedNoSyn ? "inferred, not observed; lab V2, Tl for the copied-statistics case" : "lab V2, Tl");
     fixAt(8, `EXEC DBMS_STATS.UNLOCK_PARTITION_STATS(${OT}, ${lockedName})`);
     fixAt(8, "-- gather that partition, then lock it again if you want it frozen");
   }
@@ -787,6 +817,8 @@ export function verifySql(o: Outcome): string {
   const q = (v: string, ph: string) => `'${(v || ph).replace(/'/g, "''")}'`;
   const own = q(p.owner, "OWNER"), tab = q(p.tableName, "TABLE");
   const lines = [
+    "SET LONG 1000000 LONGCHUNKSIZE 1000000   -- NOTES below is a CLOB",
+    "",
     "-- What the last gather on the table really read: one task per object",
     "SELECT t.target, t.target_type, t.target_size, t.status, t.end_time - t.start_time AS elapsed",
     "FROM   dba_optstat_operation_tasks t",

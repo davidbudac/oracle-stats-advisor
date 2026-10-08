@@ -146,10 +146,24 @@ describe("a real collect.sql output (19.27, STATS_LAB.E1)", () => {
     const r = parsePrefs(text);
     expect(r.ignored).toEqual([]);
     expect(r.values).toMatchObject({
-      owner: "STATS_LAB", tableName: "E1", partitioned: true, incremental: "TRUE", synopses: "stale",
+      owner: "STATS_LAB", tableName: "E1", partitioned: true, incremental: "TRUE", synopses: "all", lockedNoSynopsis: false,
       lockedPartitions: 1, lockedChanged: 1, lockedPartitionName: "S_2024_05", columnUsageRecorded: false, columnChange: "none",
       cascade: "AUTO_CASCADE", noInvalidate: "AUTO_INVALIDATE", options: "GATHER", degree: "NULL", tableStats: "gathered",
     });
     expect(r.recognised).toContain("COLUMN_USAGE");
+  });
+  test("a failed optional statement (no privilege on the SYS table) leaves no ignored lines", () => {
+    const r = parsePrefs(`-- ADVISOR INPUT BEGIN
+INCREMENTAL = TRUE
+SYNOPSES = stale
+          FROM   sys.wri$_optstat_synopsis_head$ h, dba_objects o
+                     *
+ERROR at line 9:
+ORA-00942: table or view does not exist
+
+SYNOPSES = all
+-- ADVISOR INPUT END`);
+    expect(r.ignored).toEqual([]);
+    expect(r.values.synopses).toBe("all");
   });
 });

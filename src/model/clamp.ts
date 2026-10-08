@@ -34,6 +34,7 @@ export function clampInput(raw: Partial<Record<keyof Input, unknown>> | null | u
   num("tableChangePercent", 0, Number.MAX_SAFE_INTEGER, false);
   const N = Number(p.partitions);
   for (const k of ["newPartitions", "changedPartitions", "lockedPartitions"] as const) num(k, 0, N);
+  num("oldFormatPartitions", 0, N); // may overlap with the other kinds: not part of the sum below
   const order: NumberKey[] = ["lockedPartitions", "newPartitions", "changedPartitions"];
   if (keep && (order as string[]).includes(keep)) order.splice(0, 0, ...order.splice(order.indexOf(keep as NumberKey), 1));
   let room = N;
@@ -66,7 +67,7 @@ export function clampInput(raw: Partial<Record<keyof Input, unknown>> | null | u
   if (p.degree === "") p.degree = "NULL";
   if (!p.partitioned) {
     // partition-only fields have no meaning on a plain table
-    Object.assign(p, { newPartitions: 0, changedPartitions: 0, lockedPartitions: 0, lockedChanged: 0, lockedNoSynopsis: false, partname: "none" });
+    Object.assign(p, { newPartitions: 0, changedPartitions: 0, lockedPartitions: 0, lockedChanged: 0, lockedNoSynopsis: false, oldFormatPartitions: 0, partname: "none" });
   }
   return { input: p as unknown as Input, notes };
 }

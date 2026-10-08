@@ -1,4 +1,4 @@
--- Gather advisor input for STATS_LAB.E1, collected 2026-10-08 08:02:30
+-- Gather advisor input for STATS_LAB.E1, collected 2026-10-08 15:31:18
 -- paste everything from BEGIN to END (the whole output is fine) into the advisor
 -- ADVISOR INPUT BEGIN
 OWNER = STATS_LAB
@@ -12,10 +12,11 @@ INDEXES = 0
 LOCAL_INDEXES = 0
 HISTOGRAMS = 1
 TABLE_STATS = gathered
-TABLE_CHANGE_PERCENT = 0.00
+TABLE_CHANGE_PERCENT = 0
 INCREMENTAL = TRUE
 INCREMENTAL_LEVEL = PARTITION
 INCREMENTAL_STALENESS = ALLOW_MIXED_FORMAT
+APPROXIMATE_NDV_ALGORITHM = REPEAT OR HYPERLOGLOG
 PUBLISH = TRUE
 ESTIMATE_PERCENT = DBMS_STATS.AUTO_SAMPLE_SIZE
 GRANULARITY = AUTO
@@ -26,28 +27,34 @@ OPTIONS = GATHER
 DEGREE = NULL
 STALE_PERCENT = 10
 PREFERENCE_OVERRIDES_PARAMETER = FALSE
-SYNOPSES = stale
+TABLE_PREFS = INCREMENTAL,INCREMENTAL_STALENESS,METHOD_OPT
+HISTOGRAM_COLUMNS = STATUS
+-- histograms kept only for incremental statistics (NOTES HIST_FOR_INCREM_STATS, not used by the optimizer, so not pinned): (none)
+SYNOPSES = all
 NEW_PARTITIONS = 0
 NEW_PARTITION =
 CHANGED_PARTITIONS = 0
 CHANGED_PARTITION =
-CHANGE_PERCENT = 0.0
+CHANGE_PERCENT = 0
 LOCKED_PARTITIONS = 1
 LOCKED_CHANGED = 1
 LOCKED_PARTITION = S_2024_05
 LOCKED_NO_SYNOPSIS = 0
+OLD_FORMAT_PARTITIONS = 0
 TABLE_LOCKED = 0
 COLUMN_CHANGE = none
--- (statement 2 below may override COLUMN_CHANGE and COLUMN_USAGE from the column usage report)
+-- (statement 2 below may override COLUMN_CHANGE and COLUMN_USAGE from the column usage report, statement 3 SYNOPSES from the synopsis table)
 COLUMN_USAGE = 0
 -- COLUMN_CHANGE: unchanged by the column usage report
 -- columns used in predicates without a histogram: (none)
+SYNOPSES = all
+-- from the synopsis table: 10 partition(s) with a synopsis, 0 unlocked partition(s) analysed after their synopsis
 -- ADVISOR INPUT END
 --   S_2024_05                        locked (ALL); 400 rows changed of 10,000; STALE_STATS=NO
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 | Operation Id | Operation                           | Target           | Start Time | End Time | Status | Total Tasks | Successful Tasks | Failed Tasks | Active Tasks                               |
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-| 4599         | gather_table_stats (reporting mode) | "STATS_LAB"."E1" |            |          |        | 1           |                  |              |                                            |
+| 4627         | gather_table_stats (reporting mode) | "STATS_LAB"."E1" |            |          |        | 1           |                  |              |                                            |
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 |                                                                                                                                                                                                     |
@@ -62,4 +69,3 @@ COLUMN_USAGE = 0
 |                                                                                                                                                                                                     |
 |                                                                                                                                                                                                     |
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
