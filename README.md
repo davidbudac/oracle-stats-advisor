@@ -61,6 +61,15 @@ after each. Same privileges and invocation as `collect.sql`; nothing is changed 
 SQL> @recommend.sql SHOP SALES
 ```
 
+To get only the settings, without the page: `sql/recommend.sql` prints the DBMS_STATS preferences
+in force for one table (current value, whether it is a table or a global preference, recommended
+value) and the `SET_TABLE_PREFS` / unlock statements the advisor would propose, with the reason
+after each. Same privileges and invocation as `collect.sql`; nothing is changed or gathered:
+
+```
+SQL> @recommend.sql SHOP SALES
+```
+
 ## What it models
 
 - **A partitioned table under `GATHER_TABLE_STATS`**: INCREMENTAL and its four conditions
@@ -101,6 +110,7 @@ src/model/             pure TypeScript, no DOM: defaults.ts (fields, defaults, p
 src/ui/                form builder, result renderer, stacked bar, DOM helpers
 src/style.css          tokens (light and dark), layout, components
 sql/collect.sql        the collector script (copied into dist/ as collect.sql)
+sql/recommend.sql      current vs recommended preferences for one table, standalone (not in the build)
 sql/recommend.sql      current vs recommended preferences for one table, standalone (not in the build)
 test/                  vitest: advise.test.ts, parse.test.ts, setup.test.ts
 docs/lab-observations.md   the 19.27 lab log the partitioned rules cite
