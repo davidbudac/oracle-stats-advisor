@@ -85,13 +85,13 @@ SYNOPSES = none
     ]);
   });
 
-  test("an empty TABLE_PREFS line means: known, none; SET_TABLE_PREFS calls mark table level; a table-level NULL staleness is restored with NULL", () => {
+  test("an empty TABLE_PREFS line means: known, none; SET_TABLE_PREFS calls mark table level; SQL NULL resets staleness to its default", () => {
     const none = parsePrefs("TABLE_PREFS =\nINCREMENTAL = FALSE").provenance;
     expect(none.tablePrefs).toEqual([]);
     const calls = parsePrefs("EXEC DBMS_STATS.SET_TABLE_PREFS('SHOP', 'SALES', 'INCREMENTAL_STALENESS', NULL)\nEXEC DBMS_STATS.SET_GLOBAL_PREFS('INCREMENTAL', 'FALSE')");
     expect(calls.provenance.tablePrefs).toEqual(["INCREMENTAL_STALENESS"]);
     const { rollback } = setupScripts({ ...base, ...calls.values }, calls.provenance);
-    expect(execs(rollback)).toContain("EXEC DBMS_STATS.SET_TABLE_PREFS('SHOP', 'SALES', 'INCREMENTAL_STALENESS', NULL)");
+    expect(execs(rollback)).toContain("EXEC DBMS_STATS.SET_TABLE_PREFS('SHOP', 'SALES', 'INCREMENTAL_STALENESS', 'ALLOW_MIXED_FORMAT')");
     expect(execs(rollback)).toContain("EXEC DBMS_STATS.DELETE_TABLE_PREFS('SHOP', 'SALES', 'INCREMENTAL')   -- inherited: FALSE");
   });
 

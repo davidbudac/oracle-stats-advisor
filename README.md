@@ -84,6 +84,13 @@ SQL> @recommend.sql SHOP SALES
 Not modelled: subpartitions, partition exchange, degree and concurrency, real-time and
 high-frequency statistics. The page lists these under "About".
 
+The [Oracle 19c review](docs/oracle19c-review.md) records the documentation checks, fixes,
+and remaining limits. This is an explanatory model supported by 19.27 lab observations,
+not an exact execution or I/O predictor for every 19c release update. The collector's table
+DML percentage is used when available; partition change percentages and block counts remain
+aggregates. The recommended setup targets the explainer's append-only workload: histogram
+pinning, ignoring locked-partition changes and publishing statistics need to fit your workload.
+
 ## Develop
 
 ```sh

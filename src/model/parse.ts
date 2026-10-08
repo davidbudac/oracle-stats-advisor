@@ -46,6 +46,7 @@ function applyKey(name: string, raw: unknown, values: Values): R {
     const n = Number(/^[+-]?\d+,\d+$/.test(v) ? v.replace(",", ".") : v); // a comma decimal from an NLS setting
     if (v === "" || !Number.isFinite(n) || n < 0) return { ok: false, reason: "expected a number" };
     values[field] = n;
+    if (field === "tableChangePercent") values.useTableChangePercent = true;
     return { ok: true };
   }
   if (kind === "option") {
@@ -74,7 +75,7 @@ function applyPref(name: string, raw: unknown, values: Values, notes: string[]):
       values.incrementalLevel = u;
       return { ok: true };
     case "INCREMENTAL_STALENESS": {
-      if (u === "" || u === "NULL") { Object.assign(values, { useStalePercent: false, useLockedStats: false, allowMixedFormat: true }); return { ok: true }; }
+      if (u === "" || u === "NULL") { Object.assign(values, { useStalePercent: false, useLockedStats: false, allowMixedFormat: false }); return { ok: true }; }
       const t = u.split(/[\s,]+/).filter(Boolean);
       if (!t.some((x) => ["USE_STALE_PERCENT", "USE_LOCKED_STATS", "ALLOW_MIXED_FORMAT"].includes(x))) return { ok: false, reason: "no known staleness flag" };
       Object.assign(values, { useStalePercent: t.includes("USE_STALE_PERCENT"), useLockedStats: t.includes("USE_LOCKED_STATS"), allowMixedFormat: t.includes("ALLOW_MIXED_FORMAT") });
@@ -104,7 +105,7 @@ function applyPref(name: string, raw: unknown, values: Values, notes: string[]):
       return { ok: true };
     case "STALE_PERCENT": {
       const n = Number(u);
-      if (!Number.isFinite(n) || n < 0 || n > 100) return { ok: false, reason: "expected a number from 0 to 100" };
+      if (!Number.isFinite(n) || n < 0) return { ok: false, reason: "expected a non-negative number" };
       values.stalePercent = n;
       return { ok: true };
     }
@@ -179,12 +180,14 @@ export function parsePrefs(text: string | null | undefined): Parsed {
   // 1. SET_TABLE_PREFS('X', 'Y', 'NAME', 'VALUE'), SET_SCHEMA_PREFS(...), SET_GLOBAL_PREFS('NAME', 'VALUE')
   const rest = source.replace(/SET_(TABLE|SCHEMA|GLOBAL)_PREFS\s*\(((?:'(?:[^']|'')*'|[^')])*)\)/gi, (whole: string, kind: string, args: string) => {
     const q = [...args.matchAll(/'((?:[^']|'')*)'/g)].map((m) => (m[1] ?? "").replace(/''/g, "'"));
-    if (/,\s*NULL\s*$/i.test(args)) q.push("NULL"); // an unquoted NULL as the value: "no staleness flag"
+    const resetsDefault = /,\s*NULL\s*$/i.test(args);
+    if (resetsDefault) q.push("NULL");
     const k = kind.toUpperCase();
     const [name, value] = k === "TABLE" ? [q[2], q[3]] : k === "SCHEMA" ? [q[1], q[2]] : [q[0], q[1]];
     const line = whole.replace(/\s+/g, " ").trim();
     if (name === undefined || value === undefined) reject(line, "could not read the arguments");
-    else route(name, value, line, k === "TABLE");
+    // SQL NULL resets the preference; the string 'NULL' disables all staleness flags.
+    else route(name, resetsDefault && canonical(name) === "INCREMENTAL_STALENESS" ? "ALLOW_MIXED_FORMAT" : value, line, k === "TABLE");
     return "\n";
   });
 

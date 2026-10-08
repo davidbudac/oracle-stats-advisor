@@ -4,7 +4,11 @@
 -- PL/SQL block that flushes the DML counters. No DDL, no DML, nothing is gathered.
 --
 -- Run it in the PDB that owns the table, as a user who can read the DBA_* views and call
--- DBMS_STATS (a DBA, or SELECT_CATALOG_ROLE + EXECUTE on DBMS_STATS):
+-- DBMS_STATS. Reports additionally need ownership or ANALYZE ANY (SYS objects need stronger
+-- privileges); SELECT_CATALOG_ROLE + EXECUTE alone is not sufficient for every report.
+-- Input owner/table names must be conventional unquoted identifiers.
+-- See docs/oracle19c-review.md for the review and remaining model limits.
+--
 --
 --     sqlplus / as sysdba                 (or sqlcl, or SQL Developer: open the file, F5)
 --     SQL> alter session set container = PDB1;
@@ -43,7 +47,7 @@
 --                             global HISTOGRAM is NONE (statement 2); else none
 --   COLUMN_USAGE              1 when REPORT_COL_USAGE lists at least one column
 --
--- Oracle 19c. Verified 2026-10-08 on 19.27 (PDB1 of the dbmint lab: STATS_LAB.SALES, E1, N4, P2 and the
+-- Oracle 19c. Original version exercised 2026-10-08 on 19.27 (PDB1 of the dbmint lab: STATS_LAB.SALES, E1, N4, P2 and the
 -- plain ST1); test/fixtures/collect-e1.txt is one real output. Read it before you run it elsewhere.
 
 SET PAGESIZE 0 LINESIZE 32767 HEADING OFF FEEDBACK OFF VERIFY OFF TRIMOUT ON TRIMSPOOL ON
@@ -86,8 +90,11 @@ WITH p AS (
   WHERE  tb.partitioned = 'YES'
 ), pc AS (
   SELECT pr.*,
-         CASE WHEN last_analyzed IS NULL THEN 1 ELSE 0 END AS is_new,
-         CASE WHEN mods = 0 THEN 0 WHEN NVL(num_rows, 0) = 0 THEN 100 ELSE ROUND(100 * mods / num_rows, 1) END AS pct
+         CASE WHEN is_locked = 0 AND (last_analyzed IS NULL OR
+                   (has_syn = 0 AND EXISTS (SELECT 1 FROM dba_tab_col_statistics c, tb
+                     WHERE c.owner = tb.own AND c.table_name = tb.tab AND c.notes LIKE '%INCREMENTAL%')))
+              THEN 1 ELSE 0 END AS is_new,
+         CASE WHEN mods = 0 THEN 0 WHEN NVL(num_rows, 0) = 0 THEN 100 ELSE 100 * mods / num_rows END AS pct
   FROM   pr
 ), ag AS (
   SELECT COUNT(*)                                                                   AS n_parts,
@@ -98,7 +105,7 @@ WITH p AS (
          MAX(CASE WHEN is_locked = 0 AND is_new = 0 AND mods > 0 THEN pct END)        AS max_pct,
          SUM(is_locked)                                                             AS n_locked,
          SUM(CASE WHEN is_locked = 1 AND mods > 0 THEN 1 ELSE 0 END)                 AS n_locked_chg,
-         MAX(CASE WHEN is_locked = 1 AND is_new = 0 AND has_syn = 0 THEN 1 ELSE 0 END) AS locked_no_syn,
+         MAX(CASE WHEN is_locked = 1 AND has_syn = 0 THEN 1 ELSE 0 END) AS locked_no_syn,
          ROUND(AVG(blocks))                                                         AS stat_blocks_avg,
          MAX(CASE WHEN is_new = 1 THEN partition_name END)
            KEEP (DENSE_RANK FIRST ORDER BY is_new DESC, partition_position)         AS name_new,
@@ -168,7 +175,7 @@ WITH p AS (
 ), w AS (
   SELECT v.*,
          CASE WHEN NVL(n_with_syn, 0) = 0 THEN 'none' WHEN global_incr = 1 THEN 'all' ELSE 'stale' END AS synopses,
-         CASE WHEN tbl_mods = 0 THEN 0 WHEN num_rows = 0 THEN 100 ELSE ROUND(100 * tbl_mods / num_rows, 2) END AS tbl_change
+         CASE WHEN tbl_mods = 0 THEN 0 WHEN num_rows = 0 THEN 100 ELSE 100 * tbl_mods / num_rows END AS tbl_change
   FROM   v
 )
 SELECT column_value AS line
@@ -188,7 +195,7 @@ FROM   w,
          'LOCAL_INDEXES = ' || TO_CHAR(w.n_local),
          'HISTOGRAMS = ' || w.has_hist,
          'TABLE_STATS = ' || w.tbl_stats,
-         'TABLE_CHANGE_PERCENT = ' || TO_CHAR(w.tbl_change, 'FM9999990.00'),
+         'TABLE_CHANGE_PERCENT = ' || TO_CHAR(w.tbl_change, 'TM9', 'NLS_NUMERIC_CHARACTERS=''.,'''),
          'INCREMENTAL = ' || NVL(w.p_incremental, 'NULL'),
          'INCREMENTAL_LEVEL = ' || NVL(w.p_incr_level, 'NULL'),
          'INCREMENTAL_STALENESS = ' || NVL(w.p_incr_staleness, 'NULL'),
@@ -205,11 +212,11 @@ FROM   w,
          'TABLE_PREFS = ' || w.tbl_prefs,
          'HISTOGRAM_COLUMNS = ' || w.hist_cols,
          'SYNOPSES = ' || w.synopses,
-         'NEW_PARTITIONS = ' || TO_CHAR(NVL(w.n_no_stats, 0) + CASE WHEN w.synopses = 'all' THEN NVL(w.n_lack_syn, 0) ELSE 0 END),
+         'NEW_PARTITIONS = ' || TO_CHAR(NVL(w.n_no_stats, 0)),
          'NEW_PARTITION = ' || w.name_new,
          'CHANGED_PARTITIONS = ' || TO_CHAR(NVL(w.n_changed, 0)),
          'CHANGED_PARTITION = ' || CASE WHEN NVL(w.n_changed, 0) > 0 THEN w.name_changed END,
-         'CHANGE_PERCENT = ' || TO_CHAR(CASE WHEN NVL(w.n_changed, 0) = 0 THEN 0 ELSE GREATEST(NVL(w.max_pct, 0), 0.1) END, 'FM9990.0'),
+         'CHANGE_PERCENT = ' || TO_CHAR(NVL(w.max_pct, 0), 'TM9', 'NLS_NUMERIC_CHARACTERS=''.,'''),
          'LOCKED_PARTITIONS = ' || TO_CHAR(NVL(w.n_locked, 0)),
          'LOCKED_CHANGED = ' || TO_CHAR(NVL(w.n_locked_chg, 0)),
          'LOCKED_PARTITION = ' || CASE WHEN NVL(w.n_locked, 0) > 0 THEN w.name_locked END,

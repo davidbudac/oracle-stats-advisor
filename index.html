@@ -124,12 +124,14 @@ INCREMENTAL = TRUE
         <summary>About this advisor, and what it does not model</summary>
         <p>Every rule on partitioned tables was observed on a lab copy of a 24-month SALES table on Oracle 19.27, or comes from the 19c documentation; each finding says which, and says <em>inferred</em> when a combination was not run. The rules on plain tables, histograms, indexes and invalidation come from the 19c SQL Tuning Guide and the DBMS_STATS reference. The lab log is in <code>docs/lab-observations.md</code>.</p>
         <ul>
-          <li><b>Blocks</b> are counted as whole partitions. A row sample still visits every block, so a sampled pass costs the same blocks as a full one; only a block sample reads less.</li>
+          <li><b>Blocks</b> are estimates using average partition size. Row samples are costed as full passes; histogram samples, segment allocation and index work can make actual I/O differ. The collector uses the largest partition change percentage for all changed partitions, so a mix of fresh and stale partitions can overestimate reads.</li>
+          <li><b>The automatic job</b> is inferred from schema GATHER AUTO tests on 19.27. The real nightly task was not run in that lab. AUTO_CASCADE index counts are observations, not a guarantee that every index is always gathered.</li>
+          <li><b>Unverified combinations</b> include force with individual partition locks, synopsis format migrations, and new histogram or column-group work under the automatic job. Non-incremental APPROX_GLOBAL AND PARTITION aggregation is represented by an upper bound.</li>
           <li><b>Subpartitions.</b> With GRANULARITY AUTO a composite table keeps partition statistics and partition synopses. In the lab, DML in one of four hash subpartitions made the whole parent partition read again.</li>
           <li><b>Partition exchange.</b> The gather after an exchange reads nothing only if the empty partition was gathered first, the staging table has a table-level synopsis (INCREMENTAL TRUE, INCREMENTAL_LEVEL TABLE) and both sides have the same histograms. Model the staging table as a plain table here.</li>
           <li><b>Degree and concurrency</b> change how long a gather takes, not what it reads. They are shown, not modelled.</li>
           <li><b>Real-time and high-frequency statistics, online statistics for loads</b> are other mechanisms; this page models one gather and the nightly job.</li>
-          <li><b>Other versions.</b> Everything was observed on 19.27. Run the dry run, REPORT_GATHER_TABLE_STATS, on your own table: it reads nothing and lists what the next gather would read.</li>
+          <li><b>Other patch levels.</b> Lab observations are from 19.27 and may vary across 19c release updates. REPORT_GATHER_TABLE_STATS reports affected objects without collecting statistics; it does not measure physical reads. Its 19c signature has no OPTIONS argument, so a GATHER AUTO call cannot be reproduced exactly by this table report.</li>
         </ul>
       </details>
     </section>

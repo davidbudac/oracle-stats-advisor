@@ -39,6 +39,10 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
   let verdict: [Level, string] | null = null;
   const setVerdict = (level: Level, headline: string) => { if (!verdict || RANK[level] > RANK[verdict[0]]) verdict = [level, headline]; };
   if (clampNotes.length) add("info", `Inputs adjusted: ${clampNotes.join(" ")}`, "input");
+  if (!auto && p.force && LCK > 0) {
+    add("warn", "force => TRUE with individually locked partitions was not tested in the lab. The read estimate retains the partition-lock assumptions; use the generated Oracle report to check this combination.", "not modelled; 19c DBMS_STATS force parameter");
+    setVerdict("warn", "Individual partition locks with force: verify in Oracle");
+  }
 
   // ---- step 0: the settings the gather actually uses
   const givenG = !auto && p.callGranularity !== "none", givenE = !auto && p.callEstimatePercent !== "none", givenM = !auto && p.callMethodOpt !== "none";
@@ -63,7 +67,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
 
   const resolved: Resolved[] = [];
   const res = (param: string, pref: keyof typeof PREF_DEFAULTS, value: string, prefValue: string, given: boolean, callValue?: string) => {
-    if (auto) resolved.push({ param, value: prefValue, source: "job", note: "the automatic job passes no parameters" });
+    if (auto) resolved.push({ param, value: param === "options" ? "GATHER AUTO" : prefValue, source: "job", note: "automatic selection using the table's preferences" });
     else if (given && ov) resolved.push({ param, value: prefValue, source: "ignored", note: `the call passed ${callValue ?? value}; PREFERENCE_OVERRIDES_PARAMETER is TRUE` });
     else if (given) resolved.push({ param, value, source: "call" });
     else resolved.push({ param, value: prefValue, source: prefValue === PREF_DEFAULTS[pref] ? "default" : "preference" });
@@ -103,10 +107,21 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
   const oneLine = `${head}${args.map((a) => `, ${a}`).join("")})`;
   const sql = auto
     ? `-- The automatic optimizer statistics collection: GATHER_DATABASE_STATS (auto) with\n-- OPTIONS => 'GATHER AUTO' and no other parameter. The nearest call you can run yourself:\nEXEC DBMS_STATS.GATHER_SCHEMA_STATS(${lit(p.owner, "OWNER")}, options => 'GATHER AUTO')`
-    : !args.length || oneLine.length <= 96 ? oneLine : `${head},\n${args.map((a) => `  ${a}`).join(",\n")})`;
+    : !args.length || oneLine.length <= 96 ? oneLine : `BEGIN\n  ${head.slice(5)},\n${args.map((a) => `    ${a}`).join(",\n")});\nEND;\n/`;
+  // The 19c reporting signature has no OPTIONS argument. BOOLEAN arguments need PL/SQL.
+  const reportArgs = args.filter((a) => !a.startsWith("options =>"));
   const dryRun = auto
     ? "SELECT DBMS_STATS.REPORT_GATHER_AUTO_STATS(detail_level => 'TYPICAL', format => 'TEXT') FROM dual;"
-    : `SELECT DBMS_STATS.REPORT_GATHER_TABLE_STATS(${OT}, detail_level => 'TYPICAL', format => 'TEXT') FROM dual;`;
+    : [
+      ...(opts === "GATHER AUTO" ? ["-- Oracle 19c REPORT_GATHER_TABLE_STATS has no OPTIONS parameter; this reports ordinary GATHER scope."] : []),
+      "SET LONG 1000000 LONGCHUNKSIZE 1000000",
+      "VARIABLE advisor_report CLOB",
+      "BEGIN",
+      `  :advisor_report := DBMS_STATS.REPORT_GATHER_TABLE_STATS(${OT},`,
+      ...reportArgs.map((a) => `    ${a},`),
+      "    detail_level => 'TYPICAL', format => 'TEXT');",
+      "END;", "/", "PRINT advisor_report",
+    ].join("\n");
 
   let partname = auto ? "none" : p.partname;
   if (partname === "new" && NEW < 1) { add("warn", "partname names the new partition, but there are no new partitions here. The advisor models the call without it.", "input"); partname = "none"; }
@@ -120,9 +135,9 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
   const blocksNow = () => Math.ceil(units() * B * sampleFactor);
 
   // table-level staleness, as the automatic job and GATHER AUTO see it
-  const tableChange = flat ? p.tableChangePercent : (NEW * 100 + CHG * p.changePercent + LCKCHG * p.changePercent) / N;
+  const tableChange = flat || p.useTableChangePercent ? p.tableChangePercent : (NEW * 100 + CHG * p.changePercent + LCKCHG * p.changePercent) / N;
   const tableStale = tableChange > p.stalePercent;
-  const noStats = flat ? p.tableStats === "none" : false;
+  const noStats = p.tableStats === "none";
   const autoPlan: AutoPlan = {
     tableChangePercent: tableChange, thresholdRows: Math.round((p.numRows * p.stalePercent) / 100), stale: tableStale || noStats,
     text: "",
@@ -166,15 +181,21 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
     };
     plans();
     if (withNext) {
+      const published = gathered && pubOn;
+      const globalPublished = published && (flat || !["untouched", "unchanged"].includes(o.global));
       const ni: Partial<Input> = {
         ...p, runBy: p.runBy, partname: "none", callGranularity: "none", callEstimatePercent: "none", callMethodOpt: "none", callCascade: "none", callNoInvalidate: "none", callOptions: "none",
         callBlockSample: false, force: false, columnChange: "none",
         newPartitions: left.newParts + left.lack, changedPartitions: left.changedParts, lockedNoSynopsis: o.lockedNoSynopsisAfter,
         synopses: o.synopsesAfter === "all" || o.synopsesAfter === "partial" ? "all" : o.synopsesAfter === "table" || o.synopsesAfter === "na" ? (flat ? S : "none") : o.synopsesAfter,
-        tableStats: gathered && !basicKept ? "gathered" : p.tableStats === "load" && gathered ? "gathered" : p.tableStats,
-        tableChangePercent: gathered ? 0 : p.tableChangePercent,
+        tableStats: globalPublished ? "gathered" : p.tableStats,
+        tableChangePercent: globalPublished ? 0 : p.tableChangePercent,
+        // Remaining below-threshold / locked DML is only estimable from partition inputs.
+        useTableChangePercent: globalPublished && !flat && (left.changedParts > 0 || LCKCHG > 0) ? false : p.useTableChangePercent,
       };
-      if (!flat && gathered && !named) {
+      // Pending statistics do not replace published statistics or repair their synopses.
+      if (!pubOn) Object.assign(ni, { newPartitions: NEW, changedPartitions: CHG, synopses: S, lockedNoSynopsis: p.lockedNoSynopsis });
+      if (!flat && published && !named) {
         // the counters of the partitions that were read are reset; the rest keep their change
         ni.changedPartitions = left.changedParts;
       }
@@ -193,6 +214,8 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
     // the scan
     if (!gathered || units() === 0) {
       o.scan = { kind: "none", percent: null, passes: 0, text: o.error ? "Nothing is read: the gather stops before it scans anything." : "Nothing is read." };
+    } else if (estN === 100) {
+      o.scan = { kind: "full", percent: 100, passes: units(), text: "ESTIMATE_PERCENT 100 reads every row and computes NDV from the complete data; it does not use AUTO_SAMPLE_SIZE's approximate NDV algorithm." };
     } else if (estNum) {
       o.scan = {
         kind: blockSample ? "block-sample" : "row-sample", percent: estV, passes: units(),
@@ -238,7 +261,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
     const extraSample = gathered && builds && !estNum;
     o.columns = {
       basic: basicKept ? "Kept from the load (STATS_ON_LOAD): NUM_ROWS, BLOCKS, AVG_ROW_LEN, and per column NUM_NULLS, LOW_VALUE, HIGH_VALUE, AVG_COL_LEN, NDV." : "NUM_ROWS, BLOCKS and AVG_ROW_LEN; for every column NUM_NULLS, LOW_VALUE, HIGH_VALUE, AVG_COL_LEN and NUM_DISTINCT, all from the one pass.",
-      ndv: !flat && o.global === "merged" ? "Partition NDVs from the one-pass sketch of each partition read; the global NDV merged from the partition synopses, nothing re-read." : estNum ? `Scaled up from the ${fmt(estV, 6)}% sample. A sample cannot tell how many values it missed, so columns with many rare values come out far too low.` : "Approximate NDV computed from every row (SAMPLE_SIZE = NUM_ROWS), typically within about 1% of the exact count.",
+      ndv: !flat && o.global === "merged" ? "Partition NDVs from the one-pass sketch of each partition read; the global NDV merged from the partition synopses, nothing re-read." : estN === 100 ? "NDV computed from all rows, without scaling up a sample." : estNum ? `Estimated from the ${fmt(estV, 6)}% sample; rare values can make NDV inaccurate.` : "Approximate NDV computed from every row (SAMPLE_SIZE = NUM_ROWS); accuracy depends on the data and algorithm.",
       rule, kinds, extraSample, deleted,
       text: "",
     };
@@ -285,7 +308,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
     const thr = autoPlan.thresholdRows;
     autoPlan.text = flat
       ? `The automatic job gathers this table when the rows changed since its last gather (inserts + updates + deletes in DBA_TAB_MODIFICATIONS) exceed STALE_PERCENT, ${fmt(p.stalePercent, 4)}% of ${fmt(p.numRows)} rows = ${fmt(thr)} rows${noStats ? "; a table without statistics is gathered first" : ""}. Today: ${pct(tableChange / 100)} changed, ${autoPlan.stale ? "stale: it is on the list, neediest objects first, until the maintenance window closes" : "not stale: the job skips it, however old the statistics are"}.`
-      : `The automatic job looks level by level. A partition with no statistics or with more than STALE_PERCENT (${fmt(p.stalePercent, 4)}%) of its rows changed is gathered. The global statistics are refreshed only when the table as a whole is stale: more than ${fmt(thr)} rows changed (${fmt(p.stalePercent, 4)}% of ${fmt(p.numRows)})${ov ? ", or, as here, when PREFERENCE_OVERRIDES_PARAMETER is TRUE" : ""}. Today the table changed by about ${pct(tableChange / 100)}: ${tableStale ? "stale as a whole" : "not stale as a whole, so a job run would leave the global statistics alone"}.`;
+      : `Modelled from schema GATHER AUTO tests on 19.27; the nightly job itself was not run. Missing or stale partitions are candidates. A global refresh is expected when global statistics are missing or the table is stale${ov ? ", or when a selected partition gather uses PREFERENCE_OVERRIDES_PARAMETER TRUE" : ""}. Table change: ${pct(tableChange / 100)} (${p.useTableChangePercent ? "supplied table-level DML percentage" : "estimate assuming equal-sized partitions"}); threshold: ${fmt(thr)} rows. Actual selection and reads should be checked with the database report.`;
   };
 
   // ============================================================ the automatic job
@@ -309,10 +332,10 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
       read.otherParts = 1;
       setVerdict("good", noStats ? "Missing statistics: gathered first" : "Stale: gathered with the table's preferences");
       add("good", `The table is ${noStats ? "without statistics" : `stale (${pct(tableChange / 100)} changed, above ${fmt(p.stalePercent, 4)}%)`}, so the job gathers it with its own preferences: ${isNum(est) ? `a ${fmt(est, 6)}% sample` : "one full scan"}, ${METHOD_OPT_TEXT[mo]}, CASCADE ${cas}.`, basisAuto);
-      if (isNum(est)) { add("bad", `The ESTIMATE_PERCENT preference is ${fmt(est, 6)}: every nightly gather samples the table, guesses the NDV and loses top-frequency and hybrid histograms. The job cannot fix that; the preference can.`, "19c Tuning Guide"); fixAt(4, sp("ESTIMATE_PERCENT", "DBMS_STATS.AUTO_SAMPLE_SIZE")); setVerdict("bad", "Stale: gathered, but sampled"); }
-      if (mo === "size1" && p.histogramsPresent) { add("bad", "The METHOD_OPT preference is SIZE 1: every nightly gather deletes the histograms, including ones a manual gather added. Fix the preference, not the gather.", "19c Tuning Guide; explainer chapter 6"); fixAt(6, `EXEC DBMS_STATS.DELETE_TABLE_PREFS(${OT}, 'METHOD_OPT')`); setVerdict("bad", "Stale: gathered, histograms deleted"); }
+      if (isNum(est)) { add("warn", `ESTIMATE_PERCENT ${fmt(est, 6)} uses ${est === 100 ? "full computation" : "sample-based NDV estimation"} and cannot use the AUTO_SAMPLE_SIZE top-frequency/hybrid histogram path.`, "19c Tuning Guide"); fixAt(4, sp("ESTIMATE_PERCENT", "DBMS_STATS.AUTO_SAMPLE_SIZE")); setVerdict(est === 100 ? "warn" : "bad", est === 100 ? "Stale: gathered with full computation" : "Stale: gathered, but sampled"); }
+      if (mo === "size1" && p.histogramsPresent) { add("bad", "The METHOD_OPT preference is SIZE 1: every nightly gather deletes the histograms, including ones a manual gather added. Fix the preference, not the gather.", "19c Tuning Guide; explainer chapter 6"); fixAt(6, sp("METHOD_OPT", "FOR ALL COLUMNS SIZE AUTO")); setVerdict("bad", "Stale: gathered, histograms deleted"); }
       if (!pubOn) { add("bad", "PUBLISH is FALSE: the job gathers into the pending area every night. LAST_ANALYZED stays old and the table stays stale, although DBA_OPTSTAT_OPERATIONS shows it was gathered.", "19c Tuning Guide; explainer chapter 6"); fixAt(3, sp("PUBLISH", "TRUE")); setVerdict("bad", "Stale: gathered into the pending area, every night"); }
-      if (noInv === "TRUE") add("warn", "NO_INVALIDATE is TRUE: the new statistics never reach existing cursors.", "19c DBMS_STATS reference");
+      if (noInv === "TRUE") add("warn", "NO_INVALIDATE is TRUE: this gather does not invalidate existing cursors; they use new statistics after a later hard parse.", "19c DBMS_STATS reference");
       return finish();
     }
     // partitioned
@@ -322,12 +345,19 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
     const partsRead = NEW + (staleChg ? CHG : 0);
     if (CHG > 0 && !staleChg) add("info", `The ${plural(CHG, "changed partition")} changed by ${pct(p.changePercent / 100)}, below STALE_PERCENT ${fmt(p.stalePercent, 4)}%: the job does not regather ${CHG === 1 ? "it" : "them"}. The job uses STALE_PERCENT per partition; INCREMENTAL_STALENESS is a rule for manual incremental gathers.`, "lab G7 for the above-threshold case; inferred for below");
     if (LCKCHG > 0) add("info", `${plural(LCKCHG, "locked partition")} had DML. The job never gathers locked partitions.`, "19c Tuning Guide");
-    const refreshGlobal = tableStale || ov;
+    const refreshGlobal = tableStale || noStats || (ov && partsRead > 0);
+    if (!refreshGlobal && partsRead === 0) {
+      gathered = false;
+      o.global = "untouched";
+      setVerdict("good", "Nothing stale: the job leaves it alone");
+      add("info", "No unlocked partition needs statistics and the global statistics are present and fresh. The preference override does not itself select a fresh table for gathering.", basisAuto);
+      return finish();
+    }
     if (!isInc) {
       if (refreshGlobal) {
         read.globalScan = N; o.global = "fullscan"; o.globalNotes = "";
-        if (tableStale) readAllPartitions();
-        setVerdict("warn", "Stale as a whole: every partition, then the whole table");
+        // Automatic selection does not make every fresh or locked partition stale.
+        setVerdict("warn", "Global refresh: selected partitions, then the whole table");
         add("warn", `INCREMENTAL is FALSE and the table is stale as a whole (${pct(tableChange / 100)} changed), so the job gathers it the old way: the stale partitions and then a scan of the whole table for the global statistics, ${fmt(blocksNow())} blocks.`, "lab T0; inferred for the job's selection");
         fixAt(1, sp("INCREMENTAL", "TRUE"));
       } else {
@@ -340,7 +370,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
       return finish();
     }
     // incremental table under the job
-    const conditionsHold = pubOn && !isNum(est) && gran !== "PARTITION" && p.incrementalLevel === "TABLE" ? false : pubOn && !isNum(est) && p.incrementalLevel !== "TABLE";
+    const conditionsHold = pubOn && !isNum(est) && p.incrementalLevel !== "TABLE";
     if (!conditionsHold) {
       add("bad", `INCREMENTAL is TRUE but ${!pubOn ? "PUBLISH is FALSE" : isNum(est) ? `ESTIMATE_PERCENT is ${fmt(est, 6)}` : "INCREMENTAL_LEVEL is TABLE"}, so the job cannot gather incrementally either: when it refreshes the global statistics it reads every partition and then the whole table.`, "lab G1, A8, N2; inferred for the job");
       if (!pubOn) fixAt(3, sp("PUBLISH", "TRUE"));
@@ -349,11 +379,12 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
     }
     if (refreshGlobal) {
       if (conditionsHold && gran !== "PARTITION") {
-        const synOk = S === "all" && !(LCKCHG > 0 && !p.useLockedStats) && !p.lockedNoSynopsis;
+        if (S !== "all") readUnlocked();
+        const synOk = !(LCKCHG > 0 && !p.useLockedStats) && !p.lockedNoSynopsis && !(LCK > 0 && S !== "all");
         if (synOk) {
           o.global = "merged"; o.globalNotes = "INCREMENTAL"; o.synopsesAfter = "all";
-          setVerdict("good", `Incremental: the job reads ${fmt(partsRead)} of ${fmt(N)} partitions, merges the rest`);
-          add("good", `${tableStale ? `The table is stale as a whole (${pct(tableChange / 100)} changed)` : "PREFERENCE_OVERRIDES_PARAMETER is TRUE"}, so the job also refreshes the global statistics, merged from the synopses without a scan.`, tableStale ? "lab G8, G9" : "lab Tb2");
+          setVerdict("good", `Incremental: the job reads ${fmt(read.newParts + read.changedParts + read.otherParts)} of ${fmt(N)} partitions, merges the rest`);
+          add("good", `${noStats ? "Global statistics are missing" : tableStale ? `The table is stale as a whole (${pct(tableChange / 100)} changed)` : "PREFERENCE_OVERRIDES_PARAMETER is TRUE"}, so a global refresh is expected, merged from synopses without another table scan.`, "lab T1, G8, G9, Tb2; inferred for the nightly job");
         } else {
           read.globalScan = N; o.global = "fullscan"; o.globalNotes = "";
           if (S !== "all") readUnlocked();
@@ -407,7 +438,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
         add("good", `OPTIONS GATHER AUTO gathers only what is missing or stale. The statistics are fresh (${pct(tableChange / 100)} changed, below STALE_PERCENT ${fmt(p.stalePercent, 4)}%), so nothing is read and nothing changes.`, "19c DBMS_STATS reference");
         return finish();
       }
-      if (p.tableStats === "load") {
+      if (p.tableStats === "load" && !tableStale) {
         basicKept = true;
         read.extraPass = 0;
         setVerdict("good", "Fills the gaps: histograms and index statistics only");
@@ -418,12 +449,14 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
       add("info", `OPTIONS GATHER AUTO: the statistics are ${p.tableStats === "none" ? "missing" : `stale (${pct(tableChange / 100)} changed)`}, so the table is gathered in full.`, "19c DBMS_STATS reference");
     }
     read.otherParts = 1;
-    if (isInc && p.incrementalLevel === "TABLE") {
+    if (isInc && p.incrementalLevel === "TABLE" && !estNum && pubOn) {
       o.synopsesAfter = "table"; o.globalNotes = "HYPERLOGLOG";
       add("good", "INCREMENTAL TRUE with INCREMENTAL_LEVEL TABLE: the gather also builds one table-level synopsis (column NOTES HYPERLOGLOG). That is what a staging table needs so that an exchange into an incremental partitioned table does not reread the partition.", "lab H5, V3");
-      if (estNum) add("bad", "A fixed ESTIMATE_PERCENT cannot build a synopsis, so the table-level synopsis is not built after all.", "lab A8; inferred for a staging table");
-    } else if (isInc) add("info", "INCREMENTAL TRUE does nothing on a non-partitioned table unless INCREMENTAL_LEVEL is TABLE (a staging table for an exchange).", "19c DBMS_STATS reference");
-    if (estNum) {
+    } else if (isInc) add("info", p.incrementalLevel === "TABLE" ? "A table-level synopsis requires published statistics and AUTO_SAMPLE_SIZE; this gather does not build one." : "INCREMENTAL TRUE does nothing on a non-partitioned table unless INCREMENTAL_LEVEL is TABLE (a staging table for an exchange).", "19c DBMS_STATS reference");
+    if (estV === 100) {
+      setVerdict("info", "Full computation: every row, exact NDV");
+      add("info", "ESTIMATE_PERCENT 100 computes from every row. It does not enable incremental synopses or AUTO_SAMPLE_SIZE's top-frequency and hybrid histogram path.", "19c DBMS_STATS reference; 19c Tuning Guide");
+    } else if (estNum) {
       setVerdict("warn", `Sampled at ${fmt(estV, 6)}%: guessed NDV, no hybrid histograms`);
       add("warn", `ESTIMATE_PERCENT ${fmt(estV, 6)}: ${blockSample ? `a block sample reads about ${pct(estV / 100)} of the blocks, but rows stored together are sampled together` : "a row sample still reads every block"}. The NDV is scaled up from the sample and lands far too low on columns with many rare values; top-frequency and hybrid histograms are impossible, so skewed columns get height-balanced ones. On 11g and later this is usually slower and worse than AUTO_SAMPLE_SIZE.`, "19c Tuning Guide; explainer chapter 5");
       if (estFromCall) hurtCall = true;
@@ -432,7 +465,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
     if (mo === "size1" && p.histogramsPresent) {
       setVerdict("bad", "Reads once, but deletes every histogram");
       add("bad", "method_opt FOR ALL COLUMNS SIZE 1 deletes every histogram on the table, including the ones the automatic job built. The symptom: plans that are good after the nightly job and bad after this script.", "lab E6; explainer chapter 5");
-      if (givenM && !ov) hurtCall = true; else fixAt(6, `EXEC DBMS_STATS.DELETE_TABLE_PREFS(${OT}, 'METHOD_OPT')`);
+      if (givenM && !ov) hurtCall = true; else fixAt(6, sp("METHOD_OPT", "FOR ALL COLUMNS SIZE AUTO"));
     } else if (mo === "size1") add("info", "FOR ALL COLUMNS SIZE 1: no histograms are built. The table has none to lose.", "19c DBMS_STATS reference");
     if (mo === "repeat" && !p.histogramsPresent) add("warn", "SIZE REPEAT on a table without histograms never builds one, however skewed a column is.", "19c DBMS_STATS reference");
     if (mo === "auto" && !p.columnUsageRecorded) add("info", "No column usage has been recorded, so SIZE AUTO builds no histogram. Histograms appear at the first gather after the columns have been used in predicates.", "19c Tuning Guide; explainer chapter 5");
@@ -442,7 +475,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
       add("warn", "PUBLISH is FALSE: the result waits in DBA_TAB_PENDING_STATS. The published statistics, LAST_ANALYZED and the staleness flag do not change, so the automatic job will gather the table again, into the pending area again.", "lab G1; 19c Tuning Guide");
       fixAt(3, sp("PUBLISH", "TRUE"));
     }
-    if (noInv === "TRUE") add("warn", "no_invalidate TRUE: existing cursors never see the new statistics.", "19c DBMS_STATS reference");
+    if (noInv === "TRUE") add("warn", "no_invalidate TRUE: this gather does not invalidate existing cursors; they use new statistics after a later hard parse.", "19c DBMS_STATS reference");
     if (cas === "FALSE" && p.indexCount > 0) add("info", "CASCADE FALSE: the indexes keep their statistics. CREATE INDEX and REBUILD compute their own, so a new index is not left without; an index whose table was reloaded or moved is.", "19c Tuning Guide; explainer chapter 10");
     if (p.tableStats === "none") add("info", "The table has no statistics yet: the first gather records everything, and the automatic job would have done the same at the next maintenance window.", "19c Tuning Guide");
     return finish();
@@ -465,9 +498,10 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
   }
 
   const partOnly = gran === "PARTITION";
+  if (!isInc && named && gran === "APPROX_GLOBAL AND PARTITION") add("warn", "APPROX_GLOBAL AND PARTITION can aggregate global statistics without scanning the table, excluding column NDV and index distinct keys, when all partition statistics are available. That aggregation path is not modelled: the displayed full scan is an upper bound.", "19c DBMS_STATS reference");
   // the old way: what a gather does when it cannot work incrementally
   const oldWay = (inferredNamed: boolean) => {
-    if (named) readNamed(); else readAllPartitions();
+    if (gran !== "GLOBAL") { if (named) readNamed(); else readUnlocked(); }
     if (!partOnly) read.globalScan = N;
     if (named && inferredNamed) add("info", "The call names a partition. Gathered the old way, that reads the partition and then the whole table, as it does without INCREMENTAL (X2). With the setting that forces the old way here, this combination was not observed.", "lab X2; inferred, not observed");
     if (partOnly) add("info", "GRANULARITY PARTITION never scans the whole table, so only the partition level is gathered. This combination, without incremental statistics, was not observed.", "19c DBMS_STATS reference; inferred, not observed");
@@ -479,13 +513,13 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
     o.global = partOnly ? "untouched" : isNum(est) ? "sample" : "fullscan";
     o.globalNotes = partOnly ? null : "";
     o.synopsesAfter = named ? (S === "all" ? "partial" : S) : (S === "all" ? "stale" : S);
-    const what = named ? (partOnly ? "that one partition" : "that partition and then the whole table") : (partOnly ? "every partition" : "every partition and then the whole table");
-    setVerdict("warn", partOnly ? "Global statistics left behind" : named ? "Not incremental: one partition, then the whole table" : "Not incremental: every partition, then the whole table");
+    const what = gran === "GLOBAL" ? "the whole table for global statistics only" : named ? (partOnly ? "that one partition" : "that partition and then the whole table") : (partOnly ? "every partition" : "every partition and then the whole table");
+    setVerdict("warn", gran === "GLOBAL" ? "Global statistics only: one table scan" : partOnly ? "Global statistics left behind" : named ? "Not incremental: one partition, then the whole table" : "Not incremental: every partition, then the whole table");
     add("warn", `INCREMENTAL is FALSE, so the gather reads ${what}: ${fmt(blocksNow())} blocks. Nothing is kept between gathers, so the next gather costs the same.`, "lab T0, L1, X2");
-    if (!partOnly) add("info", "The second pass exists because NDV does not add up across partitions: 24 monthly NDVs of about 2,500 say nothing about the global 5,000. Without synopses the only way to a global NDV is to read the whole table again.", "19c Tuning Guide; explainer chapter 8");
+    if (!partOnly && gran !== "GLOBAL") add("info", "The second pass exists because NDV does not add up across partitions: 24 monthly NDVs of about 2,500 say nothing about the global 5,000. Without synopses the only way to a global NDV is to read the whole table again.", "19c Tuning Guide; explainer chapter 8");
     if (S === "all") add("info", "Synopses from earlier incremental gathers stay in SYSAUX but are no longer kept up to date. Switching INCREMENTAL back on rereads every partition once to rebuild them.", "lab L1");
     if (partOnly) add("warn", "The global row count and the partition key's high value stay as they were. If the table never had global statistics, the TABLE row is aggregated from the partitions with GLOBAL_STATS = NO: row counts right, NDVs guesses.", "inferred, not observed; lab A3, A10 saw it on an incremental table; 19c Tuning Guide");
-    if (isNum(est)) { add("warn", `ESTIMATE_PERCENT ${fmt(est, 6)}: the NDVs are scaled up from a sample and the histograms are height-balanced at best.`, "19c Tuning Guide"); if (estFromCall) hurtCall = true; if (isNum(p.estimatePercent)) fixAt(4, sp("ESTIMATE_PERCENT", "DBMS_STATS.AUTO_SAMPLE_SIZE")); }
+    if (isNum(est)) { add("warn", `ESTIMATE_PERCENT ${fmt(est, 6)}: ${est === 100 ? "NDV is computed from all rows" : "NDV is estimated from a sample"}; frequency and height-balanced histograms are available, but top-frequency and hybrid need AUTO_SAMPLE_SIZE.`, "19c Tuning Guide"); if (estFromCall) hurtCall = true; if (isNum(p.estimatePercent)) fixAt(4, sp("ESTIMATE_PERCENT", "DBMS_STATS.AUTO_SAMPLE_SIZE")); }
     if (mo === "size1" && p.histogramsPresent) { add("bad", "FOR ALL COLUMNS SIZE 1 deletes every histogram, global and partition level.", "lab E6"); setVerdict("bad", "Two passes, and every histogram deleted"); if (givenM && !ov) hurtCall = true; }
     if (!pubOn) { o.global = partOnly ? "untouched" : "pending"; add("warn", "PUBLISH is FALSE: all of it goes to the pending area; the published statistics do not change.", "lab G1"); fixAt(3, sp("PUBLISH", "TRUE")); }
     fixAt(1, sp("INCREMENTAL", "TRUE"));
@@ -512,7 +546,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
       add("bad", "PUBLISH is FALSE. Pending statistics are gathered without synopses: every partition, then the whole table. The result waits in DBA_TAB_PENDING_STATS and the published statistics do not change.", "lab G1, G1b");
       add("bad", "Publishing the pending statistics leaves the synopses out of step: the next gather rereads every partition. Deleting them instead lets the next gather read only what changed.", "lab G1c, Tf");
       fixAt(3, sp("PUBLISH", "TRUE"));
-      fixAt(3, `EXEC DBMS_STATS.DELETE_PENDING_STATS(${OT})`);
+      fixAt(3, `-- Optional, after reviewing the pending statistics: EXEC DBMS_STATS.DELETE_PENDING_STATS(${OT})`);
     }
     if (causes.includes("level")) {
       add("bad", "INCREMENTAL_LEVEL TABLE keeps one synopsis for the whole table, which is what a staging table needs before an exchange. On a partitioned table it replaces the partition synopses, and every gather reads every partition and then the whole table.", "lab N2, X4");
@@ -666,7 +700,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
   if (mo === "size1" && p.histogramsPresent) {
     add("bad", "method_opt => 'FOR ALL COLUMNS SIZE 1' reads nothing extra but deletes every histogram, at the global and the partition level. With SIZE REPEAT as the preference they do not come back.", "lab E6, E6b");
     setVerdict("bad", "Reads little, but deletes every histogram");
-    if (givenM && !ov) hurtCall = true; else fixAt(6, `EXEC DBMS_STATS.DELETE_TABLE_PREFS(${OT}, 'METHOD_OPT')`);
+    if (givenM && !ov) hurtCall = true; else fixAt(6, sp("METHOD_OPT", "FOR ALL COLUMNS SIZE AUTO"));
   }
 
   // 4.6 synopses afterwards
@@ -681,7 +715,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
     else setVerdict("good", `Incremental: reads ${fmt(k)} of ${fmt(N)} partitions, merges the rest`);
   }
   if ((verdict as [Level, string] | null)?.[0] === "good" && !synopsisBuildOnly && !findings.some((f) => f.level === "good")) add("good", "Only partitions with no statistics, or with stale ones, are read. Every other synopsis is reused.", "lab A1, T1b");
-  if (noInv === "TRUE") add("warn", "no_invalidate TRUE: existing cursors never see the new statistics.", "19c DBMS_STATS reference");
+  if (noInv === "TRUE") add("warn", "no_invalidate TRUE: this gather does not invalidate existing cursors; they use new statistics after a later hard parse.", "19c DBMS_STATS reference");
   if (cas !== "FALSE" && p.indexCount > 0 && isInc) add("info", `Indexes are not incremental: with CASCADE ${cas === "TRUE" ? "TRUE" : "at its default"} every gather scans each of the ${plural(p.indexCount, "index", "indexes")} in full. If that dominates, set CASCADE FALSE and gather the indexes on your own schedule (GATHER_INDEX_STATS with granularity PARTITION after each load, GLOBAL weekly). That needs the override left at FALSE.`, "lab F2, F3, F5, F6, V1.4");
   return finish();
 }

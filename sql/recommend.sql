@@ -6,7 +6,11 @@
 -- nothing is gathered, no preference is changed: the statements are printed, not run.
 --
 -- Run it in the PDB that owns the table, as a user who can read the DBA_* views and call
--- DBMS_STATS (a DBA, or SELECT_CATALOG_ROLE + EXECUTE on DBMS_STATS):
+-- DBMS_STATS. Reports additionally need ownership or ANALYZE ANY (SYS objects need stronger
+-- privileges); SELECT_CATALOG_ROLE + EXECUTE alone is not sufficient for every report.
+-- Input owner/table names must be conventional unquoted identifiers.
+-- See docs/oracle19c-review.md for the review and remaining model limits.
+--
 --
 --     sqlplus / as sysdba
 --     SQL> alter session set container = PDB1;
@@ -47,7 +51,7 @@
 -- FROM says where the value in force comes from: 'table' when DBA_TAB_STAT_PREFS has a row for this
 -- table (SET_TABLE_PREFS or SET_SCHEMA_PREFS), 'global' otherwise (SET_GLOBAL_PREFS or Oracle's default).
 --
--- Oracle 19c. Verified 2026-10-08 on 19.27 (PDB1 of the dbmint lab: STATS_LAB.SALES, A1, E1, N2, N4, SHOPSALES and the plain ST1).
+-- Oracle 19c. Original version exercised 2026-10-08 on 19.27 (PDB1 of the dbmint lab: STATS_LAB.SALES, A1, E1, N2, N4, SHOPSALES and the plain ST1).
 
 SET PAGESIZE 0 LINESIZE 32767 HEADING OFF FEEDBACK OFF VERIFY OFF TRIMOUT ON TRIMSPOOL ON TAB OFF
 SET LONG 1000000 LONGCHUNKSIZE 1000000
@@ -108,30 +112,33 @@ WITH p AS (
   WHERE  tb.partitioned = 'YES'
 ), ag AS (
   SELECT COUNT(*)                                                                      AS n_parts,
-         SUM(is_new)                                                                   AS n_new,
+         SUM(CASE WHEN is_locked = 0 THEN is_new ELSE 0 END)                             AS n_new,
          SUM(CASE WHEN pr.is_locked = 0 AND pr.is_new = 0 AND pr.mods > 0
                    AND (NVL(pr.num_rows, 0) = 0 OR 100 * pr.mods / pr.num_rows > TO_NUMBER(pf.c_stale_percent DEFAULT 10 ON CONVERSION ERROR))
                   THEN 1 ELSE 0 END)                                                   AS n_stale,
          SUM(is_locked)                                                                AS n_locked,
          SUM(CASE WHEN is_locked = 1 AND mods > 0 THEN 1 ELSE 0 END)                    AS n_locked_chg,
-         SUM(CASE WHEN is_locked = 1 AND is_new = 0 AND has_syn = 0 THEN 1 ELSE 0 END)  AS n_locked_nosyn,
+         SUM(CASE WHEN is_locked = 1 AND has_syn = 0 THEN 1 ELSE 0 END)  AS n_locked_nosyn,
+         SUM(CASE WHEN is_locked = 1 AND (has_syn = 0 OR
+                   (mods > 0 AND UPPER(NVL(pf.c_incr_staleness, 'x')) NOT LIKE '%USE_LOCKED_STATS%'))
+                  THEN 1 ELSE 0 END)                                                   AS n_unlock,
          SUM(has_syn)                                                                  AS n_with_syn,
          MAX(CASE WHEN is_locked = 1 THEN partition_name END)
-           KEEP (DENSE_RANK LAST ORDER BY is_locked, CASE WHEN is_new = 0 AND has_syn = 0 THEN 2 WHEN mods > 0 THEN 1 ELSE 0 END, partition_position) AS name_locked
+           KEEP (DENSE_RANK LAST ORDER BY is_locked, CASE WHEN has_syn = 0 THEN 2 WHEN mods > 0 THEN 1 ELSE 0 END, partition_position) AS name_locked
   FROM   pr, pf
-  GROUP  BY pf.c_stale_percent
+  GROUP  BY pf.c_stale_percent, pf.c_incr_staleness
 ), f AS (
   SELECT pf.*,
          NVL(ag.n_parts, 1) AS n_parts, NVL(ag.n_new, 0) AS n_new, NVL(ag.n_stale, 0) AS n_stale,
          NVL(ag.n_locked, 0) AS n_locked, NVL(ag.n_locked_chg, 0) AS n_locked_chg, NVL(ag.n_locked_nosyn, 0) AS n_locked_nosyn,
-         NVL(ag.n_with_syn, 0) AS n_with_syn, ag.name_locked,
+         NVL(ag.n_with_syn, 0) AS n_with_syn, ag.name_locked, NVL(ag.n_unlock, 0) AS unlock_count,
          (SELECT COUNT(*) FROM dba_tab_col_statistics c WHERE c.owner = pf.own AND c.table_name = pf.tab
           AND c.histogram IS NOT NULL AND c.histogram <> 'NONE') AS n_hist,
          (SELECT COUNT(*) FROM dba_tab_pending_stats c WHERE c.owner = pf.own AND c.table_name = pf.tab) AS n_pending,
          (SELECT NVL(SUM(NVL(m.inserts, 0) + NVL(m.updates, 0) + NVL(m.deletes, 0)), 0) FROM dba_tab_modifications m
           WHERE  m.table_owner = pf.own AND m.table_name = pf.tab AND m.partition_name IS NULL) AS tbl_mods,
          TO_NUMBER(pf.c_stale_percent DEFAULT 10 ON CONVERSION ERROR) AS stale_pct,
-         CASE WHEN REGEXP_LIKE(pf.c_estimate, '^\s*[0-9.]+\s*$') THEN 1 ELSE 0 END AS est_fixed,
+         CASE WHEN TO_NUMBER(pf.c_estimate DEFAULT NULL ON CONVERSION ERROR) > 0 THEN 1 ELSE 0 END AS est_fixed,
          CASE WHEN REGEXP_LIKE(UPPER(pf.c_method_opt), '^\s*FOR\s+ALL\s+(INDEXED\s+|HIDDEN\s+)?COLUMNS\s+SIZE\s+1\s*$') THEN 'size1'
               WHEN REGEXP_LIKE(UPPER(pf.c_method_opt), '^\s*FOR\s+ALL\s+(INDEXED\s+|HIDDEN\s+)?COLUMNS\s+SIZE\s+AUTO\s*$') THEN 'auto'
               WHEN REGEXP_LIKE(UPPER(pf.c_method_opt), '^\s*FOR\s+ALL\s+(INDEXED\s+|HIDDEN\s+)?COLUMNS\s+SIZE\s+REPEAT\s*$') THEN 'repeat'
@@ -144,7 +151,7 @@ WITH p AS (
   FROM   pf LEFT JOIN ag ON 1 = 1
 ), g AS (
   SELECT f.*,
-         CASE WHEN tbl_mods = 0 THEN 0 WHEN num_rows = 0 THEN 100 ELSE ROUND(100 * tbl_mods / num_rows, 2) END AS tbl_change,
+         CASE WHEN tbl_mods = 0 THEN 0 WHEN num_rows = 0 THEN 100 ELSE 100 * tbl_mods / num_rows END AS tbl_change,
          CASE WHEN n_with_syn = 0 THEN 'none'
               WHEN EXISTS (SELECT 1 FROM dba_tab_col_statistics c WHERE c.owner = f.own AND c.table_name = f.tab AND c.notes LIKE '%INCREMENTAL%') THEN 'all'
               ELSE 'stale' END AS synopses
@@ -162,8 +169,7 @@ WITH p AS (
          CASE WHEN part = 1 AND n_locked_chg > 0 AND UPPER(NVL(c_incr_staleness, 'x')) NOT LIKE '%USE_LOCKED_STATS%'
               THEN 'USE_STALE_PERCENT,USE_LOCKED_STATS,ALLOW_MIXED_FORMAT' END AS r_incr_staleness,
          CASE WHEN part = 1 AND ov = 0 AND n_new + n_stale > 0 AND tbl_change <= stale_pct THEN 'TRUE' END AS r_overrides,
-         CASE WHEN tbl_lock IS NULL AND (n_locked_nosyn > 0 OR (n_locked_chg > 0 AND UPPER(NVL(c_incr_staleness, 'x')) NOT LIKE '%USE_LOCKED_STATS%'))
-              THEN n_locked_nosyn + CASE WHEN UPPER(NVL(c_incr_staleness, 'x')) NOT LIKE '%USE_LOCKED_STATS%' THEN n_locked_chg ELSE 0 END END AS n_unlock,
+         CASE WHEN tbl_lock IS NULL AND unlock_count > 0 THEN unlock_count END AS n_unlock,
          CASE WHEN UPPER(c_no_invalidate) = 'TRUE' THEN 'DBMS_STATS.AUTO_INVALIDATE' END AS r_no_invalidate,
          '''' || own || ''', ''' || tab || '''' AS ot
   FROM   g
@@ -230,7 +236,7 @@ FROM   lines l,
            '--   PUBLISH is FALSE: every gather lands in DBA_TAB_PENDING_STATS; LAST_ANALYZED and the staleness flag never change, so the'
            || ' automatic job gathers it again every night' || CASE WHEN l.part = 1 THEN ', and pending statistics are gathered without synopses' END || '.' END,
          CASE WHEN l.n_pending > 0 THEN
-           'EXEC DBMS_STATS.DELETE_PENDING_STATS(' || l.ot || ')' END,
+           '-- Optional, after reviewing the pending statistics: EXEC DBMS_STATS.DELETE_PENDING_STATS(' || l.ot || ')' END,
          CASE WHEN l.n_pending > 0 THEN
            '--   ' || TO_CHAR(l.n_pending) || ' pending statistics are waiting'
            || CASE WHEN l.part = 1 THEN '; publishing them leaves the synopses out of step, so the next gather rereads every partition. Delete them and gather again.'
@@ -238,7 +244,9 @@ FROM   lines l,
          CASE WHEN l.r_estimate IS NOT NULL THEN
            'EXEC DBMS_STATS.SET_TABLE_PREFS(' || l.ot || ', ''ESTIMATE_PERCENT'', ''DBMS_STATS.AUTO_SAMPLE_SIZE'')' END,
          CASE WHEN l.r_estimate IS NOT NULL THEN
-           '--   ESTIMATE_PERCENT ' || TRIM(l.c_estimate) || ': the NDV is scaled up from a sample, top-frequency and hybrid histograms are impossible'
+           '--   ESTIMATE_PERCENT ' || TRIM(l.c_estimate) || CASE WHEN TO_NUMBER(l.c_estimate DEFAULT NULL ON CONVERSION ERROR) = 100
+                   THEN ': full computation of NDV; top-frequency and hybrid histograms require AUTO_SAMPLE_SIZE'
+                   ELSE ': NDV is estimated from a sample; top-frequency and hybrid histograms require AUTO_SAMPLE_SIZE' END
            || CASE WHEN l.part = 1 THEN ', and no synopsis can be built, so the gather runs the old way' END || '.' END,
          CASE WHEN l.r_granularity IS NOT NULL THEN
            'EXEC DBMS_STATS.SET_TABLE_PREFS(' || l.ot || ', ''GRANULARITY'', ''AUTO'')' END,
@@ -247,14 +255,12 @@ FROM   lines l,
                 THEN '--   GRANULARITY PARTITION never refreshes the global statistics: the global row count and the partition key''s high value stay behind the data.'
                 ELSE '--   GRANULARITY ' || l.c_granularity || ' behaved like AUTO in the lab; AUTO is what the documentation promises.' END END,
          CASE WHEN l.r_method_opt IS NOT NULL THEN
-           CASE WHEN ',' || l.tab_prefs || ',' LIKE '%,METHOD_OPT,%'
-                THEN 'EXEC DBMS_STATS.DELETE_TABLE_PREFS(' || l.ot || ', ''METHOD_OPT'')'
-                ELSE 'EXEC DBMS_STATS.SET_TABLE_PREFS(' || l.ot || ', ''METHOD_OPT'', ''FOR ALL COLUMNS SIZE AUTO'')' END END,
+           'EXEC DBMS_STATS.SET_TABLE_PREFS(' || l.ot || ', ''METHOD_OPT'', ''FOR ALL COLUMNS SIZE AUTO'')' END,
          CASE WHEN l.r_method_opt IS NOT NULL THEN
            CASE WHEN l.mo = 'size1'
                 THEN '--   METHOD_OPT SIZE 1 deletes the ' || TO_CHAR(l.n_hist) || ' histograms this table has on every gather, including the ones a manual gather added.'
                 ELSE '--   METHOD_OPT SIZE REPEAT on a table without histograms never builds one, however skewed a column is.' END
-           || CASE WHEN ',' || l.tab_prefs || ',' LIKE '%,METHOD_OPT,%' THEN ' Deleting the table preference falls back to the global value.' END END,
+           || ' Set AUTO explicitly: the inherited global preference may also suppress histograms.' END,
          CASE WHEN l.r_incr_staleness IS NOT NULL THEN
            'EXEC DBMS_STATS.SET_TABLE_PREFS(' || l.ot || ', ''INCREMENTAL_STALENESS'', ''USE_STALE_PERCENT,USE_LOCKED_STATS,ALLOW_MIXED_FORMAT'')' END,
          CASE WHEN l.r_incr_staleness IS NOT NULL THEN
@@ -269,7 +275,7 @@ FROM   lines l,
          CASE WHEN l.r_no_invalidate IS NOT NULL THEN
            'EXEC DBMS_STATS.SET_TABLE_PREFS(' || l.ot || ', ''NO_INVALIDATE'', ''DBMS_STATS.AUTO_INVALIDATE'')' END,
          CASE WHEN l.r_no_invalidate IS NOT NULL THEN
-           '--   NO_INVALIDATE TRUE: existing cursors never see the new statistics.' END,
+           '--   NO_INVALIDATE TRUE: this gather does not invalidate existing cursors; new statistics take effect after a later hard parse.' END,
          CASE WHEN l.tbl_lock IS NOT NULL THEN
            'EXEC DBMS_STATS.UNLOCK_TABLE_STATS(' || l.ot || ')' END,
          CASE WHEN l.tbl_lock IS NOT NULL THEN
@@ -342,7 +348,7 @@ FROM   x,
          CASE WHEN x.with_hist IS NOT NULL THEN '--   columns with a histogram today: ' || x.with_hist END,
          CASE WHEN x.candidates IS NOT NULL THEN '--   used in predicates, no histogram yet (a SIZE AUTO gather may build one): ' || x.candidates END,
          CASE WHEN x.with_hist IS NOT NULL OR x.candidates IS NOT NULL THEN
-           '--   pinned list template: FOR ALL COLUMNS SIZE 1 FOR COLUMNS SIZE 254 ' || REPLACE(TRIM(',' FROM NVL(x.with_hist, '') || ',' || NVL(x.candidates, '')), ',', ' ') END
+           '--   pinned list template: FOR ALL COLUMNS SIZE 1 FOR COLUMNS SIZE 254 ' || TRIM(',' FROM NVL(x.with_hist, '') || ',' || NVL(x.candidates, '')) END
        ))
 WHERE  column_value IS NOT NULL;
 

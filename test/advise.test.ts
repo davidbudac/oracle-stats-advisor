@@ -202,7 +202,7 @@ describe("plain (non-partitioned) table", () => {
     expect(run({ ...flat, methodOpt: "repeat", histogramsPresent: false }).columns.kinds).toEqual([]);
     expect(run({ ...flat, methodOpt: "skewonly", columnUsageRecorded: false }).columns.kinds.length).toBe(2);
     expect(run({ ...flat, methodOpt: "size1", histogramsPresent: false }).verdict[0]).toBe("good");
-    expect(run({ ...flat, methodOpt: "size1" }).fixes.join("\n")).toMatch(/DELETE_TABLE_PREFS\('OWNER', 'TABLE', 'METHOD_OPT'\)/);
+    expect(run({ ...flat, methodOpt: "size1" }).fixes.join("\n")).toMatch(/SET_TABLE_PREFS\('OWNER', 'TABLE', 'METHOD_OPT', 'FOR ALL COLUMNS SIZE AUTO'\)/);
   });
   test("PUBLISH, NO_INVALIDATE, CASCADE and locks", () => {
     const pend = run({ ...flat, publish: "FALSE" });

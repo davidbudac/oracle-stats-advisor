@@ -103,10 +103,10 @@ export function createResult(root: Document | HTMLElement) {
       row("Index work", o.indexes.fullScans + o.indexes.partitionScans ? `${plural(o.indexes.fullScans, "full index scan")}${o.indexes.partitionScans ? `, ${plural(o.indexes.partitionScans, "index partition")}` : ""}` : "none"),
       row("Written to", o.write.destination === "dictionary" ? "the dictionary, published" : o.write.destination === "pending" ? "the pending area" : "nothing"),
       row("Cursors", o.write.invalidation === "rolling" ? "rolling invalidation, about 5 h" : o.write.invalidation === "immediate" ? "invalidated at once" : o.write.invalidation === "never" ? "never invalidated" : "untouched"),
-      row("The automatic job", o.auto.stale ? "would gather it: stale" : "would skip it: not stale"),
+      row("Table-level statistics", o.auto.stale ? "missing or stale by the supplied DML counters" : "not stale by DML percentage; individual partitions may still need gathering"),
     );
     $("#tip").textContent = input.partitioned
-      ? `Blocks are counted as whole partitions of ${fmt(B)} blocks, ${fmt(T)} for the table. A row sample still visits every block, so a sampled pass costs the same as a full one. What each case reads was observed on a 19.27 lab copy, scaled to your numbers.`
+      ? `Estimated table reads use ${fmt(B)} blocks per partition, ${fmt(T)} for the table. The model scales the 19.27 observations and assumes a row-sampled pass visits the same blocks as a full scan. Unequal partitions, histogram samples and index work can change the actual I/O; index scans are listed separately.`
       : `The table has ${fmt(B)} blocks. A row sample still visits every block; only block_sample => TRUE reads less. Index scans are listed, not added to the block count.`;
 
     $("#steps").replaceChildren(...stepsOf(o).map((s) => el("li", { class: `step ${s.status}` }, [

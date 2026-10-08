@@ -26,7 +26,7 @@ SHOP   SALES       AUTOSTATS_TARGET     ALL`);
     expect(rows.values).toEqual({ incremental: "TRUE", publish: "FALSE", methodOpt: "repeat", stalePercent: 5, degree: "4", noInvalidate: "FALSE" });
     expect(rows.ignoredDetail).toEqual([{ line: "SHOP SALES AUTOSTATS_TARGET ALL", reason: "not modelled" }]);
     const eq = parsePrefs("INCREMENTAL_LEVEL = TABLE\nPREFERENCE_OVERRIDES_PARAMETER: TRUE\nMETHOD_OPT = FOR ALL COLUMNS SIZE AUTO\nGRANULARITY = APPROX_GLOBAL AND PARTITION\nINCREMENTAL_STALENESS = NULL\nOPTIONS = GATHER AUTO");
-    expect(eq.values).toEqual({ incrementalLevel: "TABLE", overrides: "TRUE", methodOpt: "auto", granularity: "APPROX_GLOBAL AND PARTITION", useStalePercent: false, useLockedStats: false, allowMixedFormat: true, options: "GATHER AUTO" });
+    expect(eq.values).toEqual({ incrementalLevel: "TABLE", overrides: "TRUE", methodOpt: "auto", granularity: "APPROX_GLOBAL AND PARTITION", useStalePercent: false, useLockedStats: false, allowMixedFormat: false, options: "GATHER AUTO" });
     const cols = [["INCREMENTAL", "TRUE"], ["INCR_LEVEL", "PARTITION"], ["INCR_STALENESS", "USE_STALE_PERCENT"], ["PUBLISH", "TRUE"], ["ESTIMATE_PERCENT", "DBMS_STATS.AUTO_SAMPLE_SIZE"],
       ["GRANULARITY", "AUTO"], ["METHOD_OPT", "FOR ALL COLUMNS SIZE 1 FOR COLUMNS SIZE 254 ID"], ["OVERRIDES", "FALSE"]] as const;
     const width = (c: readonly string[]) => Math.max(...c.map((x) => x.length));
@@ -99,7 +99,7 @@ OWNER = SOMEONE_ELSE
       incremental: "TRUE", incrementalLevel: "PARTITION", useStalePercent: true, useLockedStats: false, allowMixedFormat: true,
       publish: "TRUE", estimatePercent: "auto", granularity: "AUTO", methodOpt: "auto", cascade: "AUTO_CASCADE", noInvalidate: "AUTO_INVALIDATE", options: "GATHER", degree: "NULL",
       stalePercent: 10, overrides: "FALSE",
-      synopses: "all", newPartitions: 1, newPartitionName: "SALES_2025_12", changedPartitions: 2, changedPartitionName: "SALES_2025_11", changePercent: 1.4, tableChangePercent: 4.2,
+      synopses: "all", newPartitions: 1, newPartitionName: "SALES_2025_12", changedPartitions: 2, changedPartitionName: "SALES_2025_11", changePercent: 1.4, tableChangePercent: 4.2, useTableChangePercent: true,
       lockedPartitions: 3, lockedChanged: 1, lockedPartitionName: "SALES_2024_01", lockedNoSynopsis: false, tableLocked: false, columnChange: "none",
     });
     expect(r.ignored).toEqual([]);
@@ -122,9 +122,9 @@ COLUMN_CHANGE = usage
     expect(r.values).toEqual({ columnUsageRecorded: false, columnChange: "usage" });
     expect(r.ignored).toEqual([]);
   });
-  test("INCREMENTAL_STALENESS NULL means the default flags", () => {
+  test("INCREMENTAL_STALENESS NULL from GET_PREFS means no flags", () => {
     const nul = parsePrefs("INCREMENTAL_STALENESS = NULL");
-    expect(nul.values).toEqual({ useStalePercent: false, useLockedStats: false, allowMixedFormat: true });
+    expect(nul.values).toEqual({ useStalePercent: false, useLockedStats: false, allowMixedFormat: false });
     expect(parsePrefs("-- ADVISOR INPUT BEGIN\nINCREMENTAL_STALENESS =\n-- ADVISOR INPUT END").values).toEqual(nul.values);
   });
 });

@@ -38,7 +38,7 @@ export const NUMBERS = [
 export type NumberKey = (typeof NUMBERS)[number];
 
 export const BOOLS = [
-  "partitioned", "histogramsPresent", "columnUsageRecorded",
+  "partitioned", "histogramsPresent", "columnUsageRecorded", "useTableChangePercent",
   "useStalePercent", "useLockedStats", "allowMixedFormat", "force", "callBlockSample", "lockedNoSynopsis", "tableLocked",
 ] as const;
 export type BoolKey = (typeof BOOLS)[number];
@@ -98,6 +98,7 @@ export interface Input {
   synopses: "all" | "none" | "stale";
   tableStats: "gathered" | "none" | "load";
   tableChangePercent: number;
+  useTableChangePercent: boolean;
   newPartitions: number;
   changedPartitions: number;
   changePercent: number;
@@ -152,6 +153,7 @@ export const DEFAULTS: Readonly<Input> = Object.freeze({
   synopses: "none",
   tableStats: "gathered",
   tableChangePercent: 0,
+  useTableChangePercent: false,
   newPartitions: 1,
   changedPartitions: 0,
   changePercent: 1,
@@ -211,7 +213,7 @@ export const FIELD_LABELS: Record<keyof Input, string> = {
   cascade: "CASCADE", noInvalidate: "NO_INVALIDATE", options: "OPTIONS", degree: "DEGREE", stalePercent: "STALE_PERCENT", overrides: "PREFERENCE_OVERRIDES_PARAMETER",
   runBy: "Run by", partname: "partname", callGranularity: "granularity", callEstimatePercent: "estimate_percent", callMethodOpt: "method_opt",
   callCascade: "cascade", callNoInvalidate: "no_invalidate", callOptions: "options", callBlockSample: "block_sample => TRUE", force: "force => TRUE",
-  synopses: "Synopses", tableStats: "Statistics today", tableChangePercent: "Rows changed since the last gather", newPartitions: "New partitions", changedPartitions: "Changed partitions",
+  synopses: "Synopses", tableStats: "Statistics today", tableChangePercent: "Rows changed since the last gather", useTableChangePercent: "Use measured table change", newPartitions: "New partitions", changedPartitions: "Changed partitions",
   changePercent: "Change per partition", lockedPartitions: "Locked partitions", lockedChanged: "Locked partitions with DML",
   lockedNoSynopsis: "Locked partition without synopsis", tableLocked: "LOCK_TABLE_STATS", columnChange: "Column change",
 };

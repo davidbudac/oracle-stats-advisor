@@ -44,8 +44,8 @@ export function setupScripts(before: Input, prov: Provenance | null): SetupScrip
   const lit = (v: string, placeholder: string) => `'${(v || placeholder).replace(/'/g, "''")}'`;
   const OT = `${lit(before.owner, "OWNER")}, ${lit(before.tableName, "TABLE")}`;
   const label = `${before.owner || "OWNER"}.${before.tableName || "TABLE"}`;
-  // the value as SET_TABLE_PREFS takes it: quoted, or an unquoted NULL for "no staleness flag"
-  const arg = (v: string | null) => (v === null || v === "" || v.toUpperCase() === "NULL" ? "NULL" : lit(v, ""));
+  // INCREMENTAL_STALENESS needs the string 'NULL' for no flags. SQL NULL resets defaults.
+  const arg = (v: string | null) => lit(v || "NULL", "NULL");
   const set = (name: string, v: string | null) => `EXEC DBMS_STATS.SET_TABLE_PREFS(${OT}, '${name}', ${arg(v)})`;
   const del = (name: string) => `EXEC DBMS_STATS.DELETE_TABLE_PREFS(${OT}, '${name}')`;
   const raw = (name: string) => (Object.hasOwn(P.raw, name) ? P.raw[name]!.trim() : null);
