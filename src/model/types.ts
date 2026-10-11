@@ -18,8 +18,11 @@ export type Source = "call" | "preference" | "default" | "ignored" | "job";
 /** Where one setting of the gather came from. */
 export interface Resolved { param: string; value: string; source: Source; note?: string }
 
-/** What is read, in units of one partition (B blocks). For a plain table N = 1. */
-export interface Read { newParts: number; changedParts: number; otherParts: number; extraPass: number; globalScan: number }
+/**
+ * What is read, in units of one partition (B blocks). For a plain table N = 1. `subPass` is the subpartition-level pass of
+ * a composite table whose gather collects subpartition statistics (fractions of a partition are allowed).
+ */
+export interface Read { newParts: number; changedParts: number; otherParts: number; subPass: number; extraPass: number; globalScan: number }
 
 export interface Effective {
   incremental: boolean;

@@ -73,9 +73,8 @@ This is the one list; the extension review below adds to it.
 - Outside the model: temporary, external and index-organized tables, domain indexes, partitioned
   global indexes, `partname` with a subpartition name, degree and concurrency (shown, not
   modelled).
-- Not run on the lab (updated 2026-10-11), so inferred or documentation-only: GRANULARITY AUTO on
-  LIST and RANGE subpartitions (the lab has HASH only, and the lab database could not be modified
-  in the extension review); everything the high-frequency task does (it never ran; the lab has
+- Not run on the lab (updated 2026-10-11), so inferred or documentation-only: GRANULARITY ALL or SUBPARTITION on
+  HASH subpartitions, LIST-LIST and other composites that are not range-x; everything the high-frequency task does (it never ran; the lab has
   `AUTO_TASK_STATUS` OFF); real-time statistics beside gathers (not available on the lab);
   job-driven partition exchange (lab H and V3 used explicit calls).
 - Health check: it works on dictionary heuristics, developed against one 19.27 lab database.
@@ -186,9 +185,17 @@ Added in `ce5efea` and `ec8ba71` (and the fixes after them):
   pending statistics (test, compare, publish, delete recipe); bulk-load statistics (`STATS_ON_LOAD`,
   GATHER AUTO). Seven new presets.
 - **`sql/survey.sql`** ranks a schema's tables by the blocks the next plain gather would read.
-- **Collector fixes.** DML counters for composite tables (`DBA_TAB_MODIFICATIONS` has only
-  subpartition rows there) and for tables without a roll-up row (the roll-up is not added to the
+- **Collector fixes.** DML counters for composite tables (`DBA_TAB_MODIFICATIONS` can hold
+  subpartition rows only there, as on `STATS_LAB.C1`; a fresh table had all three levels, CP5) and for tables without a roll-up row (the roll-up is not added to the
   partition rows: that double-counts); `COLUMN_GROUPS` no longer counts expression extensions.
+
+- **Composite tables, second run (2026-10-11).** The inference that GRANULARITY AUTO gathers no
+  subpartition statistics for LIST and RANGE subpartitions was wrong (lab CP1, CP2: 9 of 9
+  gathered; HASH still 0, CP3). The model now has `gathersSubpartitions(granularity, type)` (ALL,
+  SUBPARTITION, and AUTO unless HASH) and a `subPass` read field: incremental, a new partition
+  plus one modified subpartition per changed partition (the observed lower bound, CP5/CP6); not
+  incremental, a third full pass (CP8). Synopses stay partition-level (CP4, CP7). The health
+  check uses the same rule. Still not run: ALL or SUBPARTITION on HASH, non range-x composites.
 
 How it was verified:
 
@@ -201,7 +208,7 @@ How it was verified:
    `lab-observations.md`, "Dictionary observations (2026-10-11, 19.27)".
 3. **Reviewer pass** of `ce5efea` against the documentation (`ec8ba71`): the exchange lab ids were
    split per condition (H2/H7/H6 versus H5); the claim that GRANULARITY ALL / SUBPARTITION builds
-   subpartition synopses was withdrawn (the documentation is silent); the real-time statistics
+   subpartition synopses was withdrawn (the documentation is silent; CP4/CP7 confirmed: partition-level only); the real-time statistics
    wording follows the documentation (both NOTES values, "most essential statistics");
    `AUTO_TASK_MAX_RUN_TIME` cites both Oracle pages, which disagree (maximum versus default 3600);
    the high-frequency verify SQL uses documented columns; licensing wording follows Table 1-8.

@@ -181,14 +181,14 @@ AUTO_SAMPLE_SIZE, METHOD_OPT FOR ALL COLUMNS SIZE AUTO, PREFERENCE_OVERRIDES_PAR
 
 ## Dictionary observations (2026-10-11, 19.27)
 
-Read-only queries behind the collector's DETAIL block and the health check (PDB1, STATS_LAB, ORASTATS_TEST, SOE). The lab
-database could not be modified in this session, so nothing below was gathered or changed.
+Read-only queries behind the collector's DETAIL block and the health check (PDB1, STATS_LAB, ORASTATS_TEST, SOE). Nothing
+below was gathered or changed (the composite-table runs that followed, with scratch tables, are in the next section).
 
 - Q1 `DBA_OPTSTAT_OPERATION_TASKS.TARGET` is `"OWNER"."TABLE"` for a table task and `"OWNER"."TABLE"."PART"` for a partition task, with
   the double quotes. Task `NOTES` carry `<notes><histograms>A;B;</histograms><xstats>...</xstats></notes>`.
 - Q2 The automatic job's row in `DBA_OPTSTAT_OPERATIONS` is `gather_database_stats (auto)` with `JOB_NAME` like `ORA$AT_OS_OPT_SY_n`.
   Its task rows have an empty `JOB_NAME`, so the job is identified from the operation row. Task rows can be duplicated.
-- Q3 `DBA_TAB_MODIFICATIONS` for a composite table (STATS_LAB.C1) has only subpartition rows. For partitioned tables it varies:
+- Q3 `DBA_TAB_MODIFICATIONS` for a composite table (STATS_LAB.C1) has only subpartition rows (a fresh scratch table had rows at all three levels: CP5). For partitioned tables it varies:
   SOE.ORDER_ITEMS has a table roll-up row (5.3%, agreeing with `STALE_STATS = NO`, so summing the roll-up and the partition rows
   double-counts to 10.7%); STATS_LAB.A1 has partition rows only.
 - Q4 STATS_LAB.C1 (range-hash, 6 x 4) under GRANULARITY AUTO: 6 of 6 partitions analysed, 0 of 24 subpartitions (agrees with J).
@@ -214,6 +214,55 @@ database could not be modified in this session, so nothing below was gathered or
   ORASTATS_TEST.EXPR_PRED, ORDERS and SOE.ORDER_ITEMS: no ORA-/SP2- errors except the expected ORA-20005 of the dry run
   on the locked EXPR_PRED; every output parsed with zero ignored lines and produced all health sections.
 
-Not verified here (listed as limits in `docs/oracle19c-review.md`): GRANULARITY AUTO on LIST or RANGE subpartitions (the lab has
-HASH only); anything the high-frequency task does (it did not run); real-time statistics beside gathers (not available on the
+## Composite tables, second run (2026-10-11, 19.27, scratch tables STATS_LAB.ADV_RL / ADV_RR / ADV_RH)
+
+Run as SYSDBA in PDB1 with scratch tables created and dropped in the same script (the STATS_LAB quota was raised from 300M
+to 600M for the run and set back). Each table: 3 range partitions (P1-P3, months) x 3 subpartitions, 9,000 rows of about
+120 bytes, 4 columns; ADV_RL = RANGE-LIST (S_E/S_W/S_N on REGION), ADV_RR = RANGE-RANGE (S1/S2/S3 on ID), ADV_RH =
+RANGE-HASH (4 hash subpartitions, 12 in all). Method: the task rows of the last operation in `DBA_OPTSTAT_OPERATION_TASKS`
+(target types TABLE / TABLE PARTITION / TABLE SUBPARTITION), `LAST_ANALYZED` per level, synopsis heads in
+`SYS.WRI$_OPTSTAT_SYNOPSIS_HEAD$` joined by `group#/2 = object_id`, and the session statistics `table scan blocks gotten`
+/ `table scan rows gotten` (V$MYSTAT) around each gather. The recursive DBMS_STATS cursors were not visible in V$SQL from
+this session (the lab.sh method), hence the session statistics.
+
+- CP0 calibration: one `/*+ full */` scan of ADV_RL = 577 scan blocks, 9,060 scan rows, while DBA_TAB_STATISTICS says
+  BLOCKS 9,054 (3,018 per partition, 1,006 per subpartition: 8 MB segments, mostly unformatted). So BLOCKS overstates the
+  blocks a scan reads here; the comparisons below use scan rows. A gather with nothing to read costs about 100 scan
+  blocks / 5,200 scan rows of dictionary reads (CP3), so take the rows minus about 5,000.
+- CP1 RANGE-LIST, GRANULARITY AUTO (default), INCREMENTAL FALSE, first gather: 3/3 partitions and **9/9 subpartitions**
+  analyzed; tasks 1 TABLE + 3 TABLE PARTITION + 9 TABLE SUBPARTITION. AUTO does gather the subpartition level for LIST
+  subpartitions.
+- CP2 RANGE-RANGE, same: 9/9 subpartitions analyzed, the same 13 tasks. AUTO gathers the subpartition level for RANGE
+  subpartitions too.
+- CP3 RANGE-HASH control (lab J again), INCREMENTAL TRUE, AUTO: 0/12 subpartitions analyzed, tasks 1 TABLE + 3 TABLE
+  PARTITION; first gather 16,000 scan rows (one pass over the 9,000 rows). 500 rows into one hash subpartition, gather:
+  tasks TABLE + P2 only; 9,462 scan rows (P2 has 3,468 rows: the parent partition once, plus overhead).
+- CP4 RANGE-LIST, INCREMENTAL TRUE, AUTO, first gather: 27,983 scan rows (two passes: partitions with synopses, and the
+  subpartitions); 13 tasks. Synopsis heads: 12 = 3 partitions x 4 columns, all at TABLE PARTITION level, **none at
+  subpartition level**. Second gather with no change: task TABLE only, nothing read (101 scan blocks / 5,245 rows).
+- CP5 RANGE-LIST, INCREMENTAL TRUE, AUTO, 500 rows into P2/S_E, flush: `DBA_TAB_STATISTICS.STALE_STATS` = YES for P2 and
+  P2_S_E (table NO); `DBA_TAB_MODIFICATIONS` has rows at all three levels (table roll-up 500, P2 500, P2_S_E 500; unlike
+  STATS_LAB.C1 in Q3). Gather: tasks TABLE, P2, P2_S_E; only those three NUM_ROWS changed; 11,353 scan rows, i.e. the
+  **whole parent partition (3,468 rows) plus the modified subpartition (1,489 rows)**, the two unmodified subpartitions
+  skipped. The guide sentence "only gathers statistics for modified subpartitions" holds for the subpartition level; the
+  parent partition is still read in full for its partition statistics and synopsis. Compared with HASH (CP3) the
+  subpartition level costs one more read of the modified subpartition, not less.
+- CP6 RANGE-RANGE, INCREMENTAL TRUE, AUTO: first gather 27,935 scan rows (two passes, as CP4); 500 rows into P2/S1, gather:
+  tasks TABLE, P2, P2_S1; 11,360 scan rows (as CP5).
+- CP7 GRANULARITY ALL instead of AUTO, INCREMENTAL TRUE, RANGE-LIST and RANGE-RANGE: identical to AUTO. The gather right
+  after switching INCREMENTAL on (no synopses yet, no data change) ran tasks TABLE + 3 PARTITION and no subpartition tasks
+  (the subpartition statistics from CP1/CP2 were kept); with synopses present and no change: task TABLE only. 500 rows into
+  one subpartition: tasks TABLE, parent partition, that subpartition; 10,968 scan rows (as CP5). Synopses stayed at
+  partition level (12 heads). ALL on HASH subpartitions was not run.
+- CP8 RANGE-LIST, INCREMENTAL FALSE, AUTO, 500 rows into P1/S_N, plain gather: 13 tasks, 36,602 scan rows = three passes
+  over the 9,500 rows (table level, partitions, subpartitions). A table without subpartitions takes two (L1).
+- CP9 Cleanup: all three tables dropped (PURGE), quota back to 300M, no leftovers.
+
+What this changes in the advisor: GRANULARITY AUTO gathers subpartition statistics for LIST and RANGE subpartitions and
+not for HASH; synopses are partition-level whatever the subpartition type or granularity; under INCREMENTAL a changed
+partition costs the partition plus its modified subpartitions (HASH: the partition only); without INCREMENTAL a
+composite LIST/RANGE table takes a third pass for the subpartition level. Still not run: GRANULARITY ALL or SUBPARTITION
+on HASH subpartitions, LIST-LIST / LIST-RANGE / HASH-* composites (only RANGE-x), `partname` with a subpartition name.
+
+Not verified here (listed as limits in `docs/oracle19c-review.md`): anything the high-frequency task does (it did not run); real-time statistics beside gathers (not available on the
 lab); a job-driven partition exchange; the missing-privilege path of `REPORT_COL_USAGE` as a non-SYSDBA user.

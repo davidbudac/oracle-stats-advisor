@@ -21,6 +21,15 @@ const isTrue = (v: unknown): boolean => v === true || String(v).toUpperCase() ==
 const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 const RANK: Record<Level, number> = { good: 0, warn: 1, bad: 2, info: -1 };
 
+/**
+ * Does a gather with this GRANULARITY collect subpartition statistics on a composite table? ALL and SUBPARTITION do
+ * (reference); AUTO does for LIST and RANGE subpartitions (lab CP1, CP2, 19.27) and not for HASH (lab J, CP3).
+ * GLOBAL, PARTITION and GLOBAL AND PARTITION never do.
+ */
+export function gathersSubpartitions(gran: string, subpartitionType: string): boolean {
+  return gran === "ALL" || gran === "SUBPARTITION" || (gran === "AUTO" && subpartitionType !== "HASH");
+}
+
 /** `prov` is what the last paste said beyond the form (column group names and candidates); without it the texts count and the statements carry placeholders. */
 export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undefined, withNext = true, prov: Provenance | null = null): Outcome {
   const { input: p, notes: clampNotes } = clampInput(raw);
@@ -84,7 +93,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
   const effective: Effective = { incremental: isInc, granularity: gran, estimatePercent: est, methodOpt: mo, cascade: cas, noInvalidate: noInv, options: opts, blockSample, ignored };
   const granFromCall = givenG && !ov, estFromCall = givenE && !ov;
   const partGran = gran === "PARTITION" || gran === "SUBPARTITION"; // levels below the table only: the global statistics are not touched
-  const subLevel = composite && (gran === "ALL" || gran === "SUBPARTITION"); // subpartition statistics are gathered (documented values of granularity)
+  const subLevel = composite && gathersSubpartitions(gran, p.subpartitionType); // subpartition statistics are gathered (ALL, SUBPARTITION; AUTO for LIST and RANGE, lab CP1, CP2)
   if (ignored.length) {
     add("info", `The table ignores ${ignored.join(", ")} from the call and uses ${ignored.length > 1 ? "its preferences" : "its preference"}. partname and force are not preferences, so they still apply.`, "lab G2, V1.5, Ta");
   }
@@ -162,10 +171,18 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
   if (partname === "changed" && CHG < 1) { add("warn", "partname names a changed partition, but there are none here. The advisor models the call without it.", "input"); partname = "none"; }
   const named = partname !== "none";
 
-  const read: Read = { newParts: 0, changedParts: 0, otherParts: 0, extraPass: 0, globalScan: 0 };
+  const read: Read = { newParts: 0, changedParts: 0, otherParts: 0, subPass: 0, extraPass: 0, globalScan: 0 };
   const left = { newParts: NEW, changedParts: CHG, lack: 0 }; // what the gather leaves for the next plain call
   const sampleFactor = blockSample && isNum(est) ? est / 100 : 1;
-  const units = () => read.newParts + read.changedParts + read.otherParts + read.extraPass + read.globalScan;
+  // The subpartition pass of a composite table whose gather collects subpartition statistics, in partition units. Derived from the
+  // partitions read, so every reader of `units()` sees it. Incremental: a new partition is read in full again, a changed one at
+  // least in its one modified subpartition (CP5, CP6: the lower bound), a partition re-read for another reason in every
+  // subpartition (inferred). Not incremental: a third full pass (CP8). SUBPARTITION granularity gathers that level only, so
+  // the partition-unit read already is the subpartition read.
+  const syncSubPass = () => {
+    read.subPass = !subLevel || gran === "SUBPARTITION" ? 0 : isInc ? read.newParts + read.changedParts / SUB + read.otherParts : read.newParts + read.changedParts + read.otherParts;
+  };
+  const units = () => { syncSubPass(); return read.newParts + read.changedParts + read.otherParts + read.subPass + read.extraPass + read.globalScan; };
   const blocksNow = () => Math.ceil(units() * B * sampleFactor);
 
   // table-level staleness, as the automatic job and GATHER AUTO see it
@@ -291,12 +308,14 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
       const segs = partsRead * SUB;
       const refGran = "19c DBMS_STATS reference, GATHER_TABLE_STATS granularity";
       if (!subLevel) {
-        add("info", `Composite table (RANGE-${type}, ${plural(SUB, "subpartition")} per partition). GRANULARITY ${gran} gathers ${gran === "GLOBAL" ? "the table level only" : partGran ? "the partition level only" : "the table and partition level"}, no subpartition statistics${gran === "AUTO" && type !== "HASH" ? " (assumed, as for HASH: see the next finding)" : ""}${isInc ? ", and with INCREMENTAL the synopses are kept per partition" : ""}. DML in one subpartition makes the whole parent partition stale, so all ${fmt(SUB)} of its subpartitions are read: the blocks above are whole partitions, ${partsRead ? `${plural(partsRead, "partition")} read` : "none read now"}.`, type === "HASH" ? "lab J (500 rows into one hash subpartition: the whole partition re-read, 1 PART SYN); STATS_LAB.C1 has no subpartition statistics under AUTO; 19c DBMS_STATS reference ('GLOBAL AND PARTITION': no subpartition level statistics are gathered even if it is a composite partitioned object)" : "lab J for HASH subpartitions; inferred for LIST and RANGE");
-        if (gran === "AUTO" && type !== "HASH") add("warn", `The reference says only that AUTO "Determines the granularity based on the partitioning type", and the Tuning Guide that AUTO gathers "subpartition, partition, or global statistics, depending on partition type". The lab ran HASH subpartitions only (lab J). For ${type} subpartitions the advisor assumes the same as for HASH, but this is inferred: after a gather, check whether DBA_TAB_SUBPARTITIONS.LAST_ANALYZED is set. If it is, the subpartitions are gathered too and the notes for GRANULARITY ALL below apply.`, "19c DBMS_STATS reference (granularity AUTO); 19c Tuning Guide, Guideline for Partitioned Objects; inferred for LIST and RANGE");
+        const labJ = type === "HASH" && gran === "AUTO";
+        add("info", `Composite table (RANGE-${type}, ${plural(SUB, "subpartition")} per partition). GRANULARITY ${gran} gathers ${gran === "GLOBAL" ? "the table level only" : partGran ? "the partition level only" : "the table and partition level"}, no subpartition statistics${isInc ? ", and with INCREMENTAL the synopses are kept per partition" : ""}. DML in one subpartition makes the whole parent partition stale, so all ${fmt(SUB)} of its subpartitions are read: the blocks above are whole partitions, ${partsRead ? `${plural(partsRead, "partition")} read` : "none read now"}.`, labJ ? "lab J, CP3 (RANGE-HASH, AUTO: 0 of 12 and 0 of 24 subpartitions analyzed; 500 rows into one hash subpartition: the whole partition re-read, 1 PART SYN); STATS_LAB.C1 has no subpartition statistics under AUTO; 19c DBMS_STATS reference ('GLOBAL AND PARTITION': no subpartition level statistics are gathered even if it is a composite partitioned object)" : "19c DBMS_STATS reference, granularity ('GLOBAL AND PARTITION': 'No subpartition level statistics are gathered even if it is a composite partitioned object'); the whole-partition reread is lab J (HASH, AUTO)");
       } else {
-        add("info", `Composite table (RANGE-${type}, ${plural(SUB, "subpartition")} per partition). GRANULARITY ${gran} also gathers subpartition statistics ("${gran === "ALL" ? "Gathers all (subpartition, partition, and global) statistics" : "Gathers subpartition-level statistics"}"): the ${plural(partsRead, "partition")} read ${partsRead === 1 ? "is" : "are"} ${fmt(segs)} subpartition gathers, one task each in DBA_OPTSTAT_OPERATION_TASKS, in the same blocks.${gran === "SUBPARTITION" ? " SUBPARTITION gathers that level only, so the partition and table statistics stay as they were (inferred, like PARTITION in lab A3)." : ""}`, `${refGran}; inferred for the task count`);
-        if (isInc) add("info", `With INCREMENTAL the guide says: "If a table uses composite partitioning, then the database only gathers statistics for modified subpartitions. The database does not gather statistics at the subpartition level for unmodified subpartitions." So a changed partition costs only its modified subpartitions, up to ${fmt(SUB)} times fewer blocks than shown; a new partition is read in full. The page keeps partition units and shows the upper bound. Lab J ran AUTO only, where the partition was the unit (partition-level statistics and synopses) and the whole parent partition was re-read; the guide documents partition-level synopses ("Each partition maintains a synopsis") and says nothing about subpartition-level ones, so what ${gran} does to the synopses is not observed.`, `${tuning}, Considerations for Incremental Statistics Maintenance; inferred for the synopsis level`);
-        else add("info", "Without INCREMENTAL nothing is kept between gathers: every subpartition of every partition is read, and the table level needs its own pass. The extra level adds tasks, not blocks, in this model.", "inferred, not observed");
+        const observed = type !== "HASH" && (gran === "AUTO" || gran === "ALL");
+        const subBasis = observed ? "lab CP1, CP2 (AUTO), CP4, CP7 (synopses at partition level, ALL like AUTO); 19c DBMS_STATS reference, granularity" : `${refGran} ('${gran === "ALL" ? "ALL - Gathers all (subpartition, partition, and global) statistics" : "SUBPARTITION - Gathers subpartition-level statistics"}'); not run on ${type} subpartitions (CP7 ran LIST and RANGE), inferred`;
+        add("info", `Composite table (RANGE-${type}, ${plural(SUB, "subpartition")} per partition). GRANULARITY ${gran} also gathers subpartition statistics${gran === "AUTO" ? ` (AUTO does for LIST and RANGE subpartitions, not for HASH)` : ""}: one task per subpartition in DBA_OPTSTAT_OPERATION_TASKS (observed: 3 partitions of 3 subpartitions gave 1 TABLE + 3 PARTITION + 9 SUBPARTITION tasks, 13 in all). The ${plural(partsRead, "partition")} read ${partsRead === 1 ? "is" : "are"} ${fmt(segs)} subpartition gathers. Synopses stay at the partition level whatever the granularity (CP4, CP7: 3 partitions x 4 columns = 12, none at subpartition level).${gran === "SUBPARTITION" ? " SUBPARTITION gathers that level only, so the partition and table statistics stay as they were (inferred, like PARTITION in lab A3)." : ""}`, subBasis);
+        if (isInc) add("info", `With INCREMENTAL a changed partition costs the whole parent partition (its statistics and synopsis) plus its modified subpartitions; unmodified subpartitions are skipped and keep their old statistics, as the guide says: "If a table uses composite partitioning, then the database only gathers statistics for modified subpartitions." (CP5, CP6, CP7: DML in one subpartition gave tasks TABLE, parent partition and that subpartition; the reads were the whole partition plus the one subpartition.) That is between 1 and ${fmt(SUB)} subpartitions on top of the partition, so up to twice the partition. The model counts one modified subpartition per changed partition, the observed lower bound. A new partition, or the first INCREMENTAL gather, takes two passes: the partition pass that writes the synopses, then the subpartition pass (CP4, CP6). With no change nothing is read (CP4).`, observed ? "lab CP4, CP5, CP6, CP7; 19c SQL Tuning Guide, Considerations for Incremental Statistics Maintenance" : `${tuning}, Considerations for Incremental Statistics Maintenance; the read pattern is lab CP5-CP7 (LIST, RANGE), inferred for ${type} subpartitions`);
+        else add("info", "Without INCREMENTAL nothing is kept between gathers: a plain gather makes three passes over everything, the table level, the partitions and the subpartitions (observed on RANGE-LIST: 13 tasks, three passes). A table without subpartitions takes two. The model adds the subpartition pass as a third.", observed ? "lab CP8, L1" : "lab CP8, L1 (LIST); inferred for this combination");
       }
       add("info", "partname with a subpartition name is out of scope: the reference describes partname as \"Name of the partition\", and the page models partition names only. To gather one subpartition, call GATHER_TABLE_STATS with the subpartition name yourself and check the result in DBA_TAB_SUBPARTITIONS.", "19c DBMS_STATS reference, GATHER_TABLE_STATS partname; not modelled");
     }
@@ -999,7 +1018,7 @@ export function stepsOf(o: Outcome): Step[] {
   else if (o.write.destination === "pending") steps.push({ id: "history", title: "Save the current statistics", status: "skips", text: o.write.history, basis: "19c Tuning Guide" });
   else steps.push({ id: "history", title: "Save the current statistics", status: "does", text: o.write.history, basis: "19c Tuning Guide; explainer chapter 12" });
   // read
-  const units = r.newParts + r.changedParts + r.otherParts + r.extraPass + r.globalScan;
+  const units = r.newParts + r.changedParts + r.otherParts + r.subPass + r.extraPass + r.globalScan;
   let readText: string;
   if (units === 0) readText = o.error ? "Nothing." : o.verdict[1].startsWith("Nothing") || o.verdict[1].startsWith("Not stale") || o.verdict[1].startsWith("Fills") ? (o.columns.basic.startsWith("Kept") ? "No pass for the basic statistics: the load already counted the rows. Only the histogram sample below." : "Nothing: no partition is new or stale, and the global statistics need no scan.") : "Nothing.";
   else if (flat) readText = `${o.scan.text} ${fmt(o.blocks)} blocks.`;
@@ -1008,13 +1027,17 @@ export function stepsOf(o: Outcome): Step[] {
     if (r.newParts) parts.push(`${plural(r.newParts, "new partition")} (no statistics yet)`);
     if (r.changedParts) parts.push(`${plural(r.changedParts, "changed partition")}`);
     if (r.otherParts) parts.push(`${plural(r.otherParts, "other partition")} again`);
+    if (r.subPass) parts.push(`plus the subpartition level (${Math.round(r.subPass * 100) / 100} partition-equivalents)`);
     if (r.extraPass) parts.push(`one more pass over ${plural(r.extraPass, "partition")} for the histograms`);
     if (r.globalScan) parts.push(`then the whole table (${fmt(N)} partitions) for the global statistics`);
     readText = `${parts.join(", ")}: ${fmt(o.blocks)} blocks, counted as whole partitions of ${fmt(B)}. ${o.scan.text}`;
   }
   if (!flat && p.subpartitioned && units > 0) {
-    const g = o.effective.granularity, per = p.subpartitionsPerPartition, sublvl = g === "ALL" || g === "SUBPARTITION";
-    readText += ` Composite table: a partition read here is all of its ${plural(per, `${p.subpartitionType} subpartition`)} (about ${fmt(Math.ceil(B / per))} blocks each)${sublvl ? `, gathered as ${fmt(o.partitionsRead * per)} subpartition tasks` : ", with no subpartition statistics gathered"}.`;
+    const g = o.effective.granularity, per = p.subpartitionsPerPartition, sublvl = gathersSubpartitions(g, p.subpartitionType);
+    readText += ` Composite table: a partition read here is all of its ${plural(per, `${p.subpartitionType} subpartition`)} (about ${fmt(Math.ceil(B / per))} blocks each)${sublvl ? `, gathered as ${o.effective.incremental ? "up to " : ""}${fmt(o.partitionsRead * per)} subpartition tasks (CP1)` : ", with no subpartition statistics gathered"}.`;
+    if (r.subPass) readText += o.effective.incremental
+      ? ` The subpartition level adds the modified subpartitions: a new partition is read in full again, a changed partition in one subpartition (${fmt(Math.ceil(B / per))} blocks). That figure assumes one modified subpartition per changed partition; it can rise to the whole partition again if DML touched every subpartition (CP5, CP6).`
+      : " Without INCREMENTAL the subpartition level is a third full pass (CP8).";
   }
   steps.push({ id: "read", title: "Read the table", status: units === 0 ? "skips" : "does", text: readText, reads: units ? `${fmt(o.blocks)} blocks` : "0 blocks", basis: flat ? "19c Tuning Guide; explainer chapter 5" : "19.27 lab, scaled to your numbers" });
   // columns
@@ -1107,7 +1130,7 @@ export function verifySql(o: Outcome): string {
   if (p.partitioned && p.subpartitioned) {
     lines.push(
       "",
-      "-- Composite table: does any subpartition have statistics? (GRANULARITY AUTO gathered none for HASH subpartitions in the lab)",
+      "-- Composite table: does any subpartition have statistics? (GRANULARITY AUTO gathered none for HASH subpartitions in the lab; it does gather them for LIST and RANGE)",
       "SELECT COUNT(*) AS subpartitions, COUNT(last_analyzed) AS with_statistics",
       "FROM   dba_tab_subpartitions",
       `WHERE  table_owner = ${own} AND table_name = ${tab};`,

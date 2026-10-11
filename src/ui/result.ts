@@ -72,6 +72,7 @@ export function createResult(root: Document | HTMLElement) {
       { label: flat ? "the table" : `${fmt(r.newParts)} new`, value: Math.ceil(r.newParts * B * f), color: "new" as const },
       { label: `${fmt(r.changedParts)} changed`, value: Math.ceil(r.changedParts * B * f), color: "changed" as const },
       { label: flat ? "the table" : `${fmt(r.otherParts)} others again`, value: Math.ceil(r.otherParts * B * f), color: "other" as const },
+      { label: "subpartition level", value: Math.ceil(r.subPass * B * f), color: "extra" as const },
       { label: "every partition again", value: Math.ceil(r.extraPass * B * f), color: "extra" as const },
       { label: "whole table again", value: Math.ceil(r.globalScan * B * f), color: "global" as const },
     ].filter((s) => s.value > 0);

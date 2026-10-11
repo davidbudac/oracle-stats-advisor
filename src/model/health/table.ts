@@ -8,6 +8,7 @@
 // The WP5 rules in advise.ts (subpartition granularity, real-time, high-frequency, PUBLISH FALSE, bulk-load notes) are not
 // repeated; the health check adds what the dictionary shows.
 
+import { gathersSubpartitions } from "../advise";
 import type { Input } from "../defaults";
 import { toTime, type HistoryRec, type PartitionRec, type WindowRec } from "../detail";
 import { fmt, pct, plural } from "../format";
@@ -259,8 +260,8 @@ export function stalenessSection({ input, detail: d }: HealthContext): HealthSec
     const noStats = d.partitions.filter((p) => p.lastAnalyzed == null);
     if (noStats.length) add("warn", `${plural(noStats.length, "partition")} ${noStats.length === 1 ? "has" : "have"} no statistics (LAST_ANALYZED empty): ${noStats.slice(0, 10).map((p) => p.name).join(", ")}${noStats.length > 10 ? ", ..." : ""}. A gather reads them first.`, "DBA_TAB_STATISTICS (LAST_ANALYZED empty); the task gathers objects with no statistics");
   }
-  if (d.subpartitioning && d.subpartitioning !== "NONE") add("info", "This table is composite: DBA_TAB_MODIFICATIONS can hold DML on subpartition rows only (STATS_LAB.C1 had 24 subpartition rows and none for the table or its partitions), so a table-level count of 0 does not prove that nothing changed. Read the subpartition rows.",
-    "lab Q3 (STATS_LAB.C1: subpartition rows only; SOE.ORDER_ITEMS and STATS_LAB.A1 differ); 19c Reference, ALL_TAB_MODIFICATIONS (PARTITION_NAME and SUBPARTITION_NAME columns)",
+  if (d.subpartitioning && d.subpartitioning !== "NONE") add("info", "This table is composite: DBA_TAB_MODIFICATIONS can hold DML on subpartition rows only (STATS_LAB.C1 had 24 subpartition rows and none for the table or its partitions), sometimes (a fresh table in lab CP5 had rows at all three levels), so a table-level count of 0 does not prove that nothing changed. Read the subpartition rows.",
+    "lab Q3 (STATS_LAB.C1: subpartition rows only), CP5 (rows at table, partition and subpartition level; SOE.ORDER_ITEMS and STATS_LAB.A1 differ); 19c Reference, ALL_TAB_MODIFICATIONS (PARTITION_NAME and SUBPARTITION_NAME columns)",
     [`SELECT partition_name, subpartition_name, inserts, updates, deletes FROM dba_tab_modifications WHERE table_owner = ${own} AND table_name = ${tab} AND subpartition_name IS NOT NULL ORDER BY partition_name, subpartition_name;`]);
 
   const composite = d.subpartitioning != null && d.subpartitioning !== "NONE";
@@ -550,22 +551,26 @@ export function subpartitionsSection({ input, detail: d }: HealthContext): Healt
   const n = d.subpartitions, w = d.subpartitionsWithStats;
   const type = d.subpartitioning;
   const gran = input.callGranularity !== "none" && input.overrides !== "TRUE" ? input.callGranularity : input.granularity;
-  const subLevel = gran === "ALL" || gran === "SUBPARTITION";
+  const subLevel = gathersSubpartitions(gran, type);
   const inc = input.partitioned && input.incremental === "TRUE";
   const survey = [`SELECT COUNT(*) AS subpartitions, COUNT(last_analyzed) AS with_statistics FROM dba_tab_subpartitions WHERE table_owner = ${own} AND table_name = ${tab};`];
   if (n == null || w == null) return section("subpartitions", "Subpartition statistics", "subpartition counts not collected", [{ level: "info", text: `The table is subpartitioned by ${type}; the collector did not count its subpartitions.`, basis: "DBA_PART_TABLES.SUBPARTITIONING_TYPE", fix: survey }]);
   add("info", `The table is composite (subpartitioned by ${type}): ${plural(n, "subpartition")}, ${fmt(w)} with statistics${n ? ` (${pct(w / n)})` : ""}.`, "DBA_TAB_SUBPARTITIONS.LAST_ANALYZED", survey);
-  if (!subLevel && w === 0) add("info", `GRANULARITY ${gran} gathers no subpartition statistics${type === "HASH" ? ", which matches: none exist" : ` on a HASH-subpartitioned table (lab); for ${type} subpartitions that was not tested, but none exist here`}. The optimizer works from partition and global statistics.${inc ? " DML in one subpartition makes the whole partition stale, so a gather rereads the whole partition (lab J: 500 rows into one hash subpartition, one PART SYN statement over the partition)." : ""}`,
-    `${REF}, granularity ('AUTO - Determines the granularity based on the partitioning type'; 'GLOBAL AND PARTITION - ... No subpartition level statistics are gathered even if it is a composite partitioned object'); lab J, Q4 (HASH subpartitions, AUTO: partition statistics, no subpartition statistics)${type === "HASH" ? "" : "; for " + type + " subpartitions this is inferred"}`);
-  else if (subLevel && w < n) add("warn", `GRANULARITY ${gran} should gather the subpartitions, yet ${fmt(n - w)} of ${fmt(n)} have no statistics. Either no gather has run since the setting changed, or those subpartitions were skipped (locked, or no data change under incremental maintenance).`,
-    `${REF}, granularity ('ALL' gathers all; 'SUBPARTITION - Gathers subpartition-level statistics'); 19c Tuning Guide, Considerations for Incremental Statistics Maintenance ('the database only gathers statistics for modified subpartitions')`, [`EXEC DBMS_STATS.GATHER_TABLE_STATS(${OT}, granularity => 'ALL')`]);
-  else if (!subLevel && w > 0) add("info", `${fmt(w)} subpartitions carry statistics although GRANULARITY ${gran} does not gather that level, so they date from an earlier ALL or SUBPARTITION gather. They are not refreshed, so they fall behind the partition statistics; the optimizer can use them when pruning leaves a single subpartition (inferred).`,
+  if (!subLevel && w === 0) add("info", `GRANULARITY ${gran} gathers no subpartition statistics${gran === "AUTO" ? " on HASH subpartitions, which matches: none exist (lab J, CP3)" : `, which matches: none exist (the reference: 'GLOBAL AND PARTITION' gathers no subpartition level statistics)`}. The optimizer works from partition and global statistics.${inc ? " DML in one subpartition makes the whole partition stale, so a gather rereads the whole partition (lab J: 500 rows into one hash subpartition, one PART SYN statement over the partition)." : ""}`,
+    `${REF}, granularity ('AUTO - Determines the granularity based on the partitioning type'; 'GLOBAL AND PARTITION - ... No subpartition level statistics are gathered even if it is a composite partitioned object')${gran === "AUTO" ? "; lab J, CP3, Q4 (HASH subpartitions, AUTO: partition statistics, no subpartition statistics)" : ""}`);
+  else if (subLevel && w < n) add("warn", `GRANULARITY ${gran} should gather the subpartitions${gran === "AUTO" ? ` (AUTO does for ${type} subpartitions: lab CP1, CP2)` : ""}, yet ${fmt(n - w)} of ${fmt(n)} have no statistics. ${inc ? "Under INCREMENTAL a gather skips unmodified subpartitions and they keep their old statistics (lab CP7), so missing ones mean no gather has run since they were created, or the subpartitions are locked." : "Either no gather has run since the setting changed, or those subpartitions were skipped (locked)."}`,
+    `${REF}, granularity ('ALL' gathers all; 'SUBPARTITION - Gathers subpartition-level statistics'); lab CP1, CP2, CP7; 19c Tuning Guide, Considerations for Incremental Statistics Maintenance ('the database only gathers statistics for modified subpartitions')`, [`EXEC DBMS_STATS.GATHER_TABLE_STATS(${OT}, granularity => 'ALL')`]);
+  else if (!subLevel && w > 0) add("info", `${fmt(w)} subpartitions carry statistics although GRANULARITY ${gran} does not gather that level${gran === "AUTO" ? " on HASH subpartitions" : ""}, so they date from an earlier ALL or SUBPARTITION gather. They are not refreshed, so they fall behind the partition statistics; the optimizer can use them when pruning leaves a single subpartition (inferred).`,
     `${REF}, granularity; which level the optimizer uses is inferred, not found in the Tuning Guide pages read`, [`SELECT subpartition_name, num_rows, last_analyzed FROM dba_tab_subpartitions WHERE table_owner = ${own} AND table_name = ${tab} ORDER BY last_analyzed NULLS FIRST;`]);
-  else add("info", `GRANULARITY ${gran} gathers the subpartition level and all ${fmt(n)} subpartitions have statistics.`, REF);
+  else add("info", `GRANULARITY ${gran} gathers the subpartition level and all ${fmt(n)} subpartitions have statistics.`, `${REF}${gran === "AUTO" ? "; lab CP1, CP2" : ""}`);
   if (!subLevel) add("info", inc
-    ? "Subpartition statistics would help only if pruning often reaches a single subpartition, and they cost a read of every subpartition at each gather. On this INCREMENTAL table keep GRANULARITY AUTO: the Tuning Guide lists it among the conditions for incremental statistics (lab A6 saw ALL work on a table without subpartitions; a composite table was not tested)."
-    : "Subpartition statistics help the optimizer when pruning often reaches a single subpartition, at the price of reading every subpartition at each gather. The table preference GRANULARITY ALL does that; the default AUTO does not.",
-    `${REF}, granularity; 19c Tuning Guide, Guideline for Partitioned Objects ('The ALL setting gathers statistics for all types'), Considerations for Incremental Statistics Maintenance ('AUTO for GRANULARITY'); lab A6; the cost is inferred`,
+    ? `Subpartition statistics would help only if pruning often reaches a single subpartition, and they cost a read of every subpartition at each gather. On this INCREMENTAL table keep GRANULARITY AUTO: the Tuning Guide lists it among the conditions for incremental statistics. GRANULARITY ALL gathers the hash subpartitions too (reference; not run on HASH, CP7 ran LIST and RANGE: ALL and AUTO behaved identically on a composite table under INCREMENTAL).`
+    : "Subpartition statistics help the optimizer when pruning often reaches a single subpartition, at the price of reading every subpartition at each gather. The table preference GRANULARITY ALL does that (reference; not run on HASH subpartitions, CP7 ran LIST and RANGE); the default AUTO does not for HASH.",
+    `${REF}, granularity; 19c Tuning Guide, Guideline for Partitioned Objects ('The ALL setting gathers statistics for all types'), Considerations for Incremental Statistics Maintenance ('AUTO for GRANULARITY'); lab CP7; the cost is inferred`,
     inc ? undefined : ["-- an option, not a recommendation", `-- EXEC DBMS_STATS.SET_TABLE_PREFS(${OT}, 'GRANULARITY', 'ALL')`]);
+  else if (gran === "AUTO") add("info", inc
+    ? "GRANULARITY AUTO already gathers the subpartition level here. Under INCREMENTAL a changed partition costs the whole parent partition plus its modified subpartitions (1 to all of them), unmodified subpartitions are skipped, and synopses stay at the partition level (lab CP5, CP7). A table preference GRANULARITY ALL would change nothing (CP7: identical to AUTO)."
+    : "GRANULARITY AUTO already gathers the subpartition level here. Without INCREMENTAL a plain gather makes three passes over everything: table, partitions and subpartitions (lab CP8).",
+    `lab CP1, CP2, CP5, CP7, CP8; ${REF}, granularity`);
   return section("subpartitions", "Subpartition statistics", `${fmt(n)} subpartitions, ${fmt(w)} with statistics`, f);
 }

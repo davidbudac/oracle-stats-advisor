@@ -71,7 +71,7 @@ describe("health table sections on the lab fixtures", () => {
     const s = subpartitionsSection(ctx(input, detail))!;
     expect(s.summary).toBe("24 subpartitions, 0 with statistics");
     expect(s.findings[0]!.text).toMatch(/24 subpartitions, 0 with statistics/);
-    expect(text(s)).toMatch(/GRANULARITY AUTO gathers no subpartition statistics, which matches/);
+    expect(text(s)).toMatch(/GRANULARITY AUTO gathers no subpartition statistics on HASH subpartitions, which matches: none exist \(lab J, CP3\)/);
     expect(text(s)).toMatch(/the whole partition is stale, so a gather rereads the whole partition|makes the whole partition stale, so a gather rereads the whole partition/); // incremental, lab J
     expect(text(s)).toMatch(/keep GRANULARITY AUTO/); // GRANULARITY ALL is not offered on an INCREMENTAL table
     expect(fixes(s)).toMatch(/dba_tab_subpartitions/);
@@ -82,6 +82,27 @@ describe("health table sections on the lab fixtures", () => {
     expect(text(st)).toMatch(/composite: DBA_TAB_MODIFICATIONS can hold DML on subpartition rows only/);
     expect(fixes(st)).toMatch(/subpartition_name IS NOT NULL/);
     expect(levels(stalenessSection(ctx(input, detail)))).not.toContain("good"); // 0 changed rows on a composite table proves nothing
+  });
+
+  test("subpartitions: composite LIST under AUTO gathers the level (CP1, CP2)", () => {
+    const base = { subpartitioning: "LIST", subpartitions: 24, partitionCount: 6 } as Partial<Detail>;
+    const inp = { partitioned: true, incremental: "TRUE", granularity: "AUTO" } as Partial<Input>;
+    const full = subpartitionsSection(synth({ ...base, subpartitionsWithStats: 24 }, inp))!;
+    expect(text(full)).toMatch(/GRANULARITY AUTO gathers the subpartition level and all 24 subpartitions have statistics/);
+    expect(text(full)).toMatch(/already gathers the subpartition level here/);
+    expect(text(full)).toMatch(/whole parent partition plus its modified subpartitions/);
+    expect(text(full)).not.toMatch(/gathers no subpartition statistics|not tested/);
+    expect(fixes(full)).not.toMatch(/SET_TABLE_PREFS/); // no fix line: AUTO already does it
+    expect(levels(full)).not.toContain("warn");
+    const none = subpartitionsSection(synth({ ...base, subpartitionsWithStats: 0 }, inp))!;
+    const w = find(none, /should gather the subpartitions/)!;
+    expect(w.level).toBe("warn");
+    expect(w.text).toMatch(/AUTO does for LIST subpartitions: lab CP1, CP2/);
+    expect(w.text).toMatch(/unmodified subpartitions .* keep their old statistics \(lab CP7\)/);
+    // GLOBAL AND PARTITION gathers none, LIST or not
+    const gp = subpartitionsSection(synth({ ...base, subpartitionsWithStats: 0 }, { ...inp, granularity: "GLOBAL AND PARTITION" }))!;
+    expect(text(gp)).toMatch(/gathers no subpartition statistics, which matches: none exist \(the reference/);
+    expect(text(gp)).not.toMatch(/not tested/);
   });
 
   test("subpartitions: null for a partitioned table without subpartitions and for a plain one", () => {

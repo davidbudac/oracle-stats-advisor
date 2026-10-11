@@ -318,43 +318,71 @@ describe("composite tables (lab J)", () => {
     expect(step.text).toMatch(/no subpartition statistics gathered/);
     expect(verifySql(o)).toMatch(/dba_tab_subpartitions/);
   });
-  test("LIST and RANGE subpartitions under AUTO are an inference, not a lab result", () => {
+  test("LIST and RANGE subpartitions under AUTO are gathered (CP1, CP2); HASH is not (lab J, CP3)", () => {
     const hash = run(comp);
-    expect(hash.findings.some((x) => /Determines the granularity based on the partitioning type/.test(x.text))).toBe(false);
     for (const subpartitionType of ["LIST", "RANGE"] as const) {
       const o = run({ ...comp, subpartitionType });
-      const w = o.findings.find((x) => x.level === "warn" && /Determines the granularity based on the partitioning type/.test(x.text))!;
-      expect(w.text).toMatch(new RegExp(`For ${subpartitionType} subpartitions the advisor assumes the same as for HASH, but this is inferred`));
-      expect(w.basis).toMatch(/inferred for LIST and RANGE/);
-      expect(o.blocks).toBe(hash.blocks); // the read model keeps partition units
+      const texts = o.findings.map((x) => `${x.text}\n${x.basis}`).join("\n");
+      expect(texts).not.toMatch(/inferred for LIST and RANGE|assumed, as for HASH|Determines the granularity based on the partitioning type/);
+      const f = o.findings.find((x) => /^Composite table/.test(x.text))!;
+      expect(f.text).toMatch(/also gathers subpartition statistics \(AUTO does for LIST and RANGE subpartitions, not for HASH\)/);
+      expect(f.text).toMatch(/1 TABLE \+ 3 PARTITION \+ 9 SUBPARTITION tasks/);
+      expect(f.text).toMatch(/Synopses stay at the partition level/);
+      expect(f.basis).toMatch(/CP1, CP2/);
+      const step = stepsOf(o).find((s) => s.id === "read")!;
+      expect(step.text).toMatch(/plus the subpartition level \(0\.25 partition-equivalents\)/);
+      expect(step.text).toMatch(/up to 4 subpartition tasks \(CP1\)/);
+      expect(step.text).toMatch(/one modified subpartition per changed partition/);
+      expect(o.read.subPass).toBeCloseTo(0.25);
+      expect(o.blocks).toBe(Math.ceil(B * 1.25));
     }
+    expect(hash.read.subPass).toBe(0);
+    expect(hash.findings.find((x) => /^Composite table/.test(x.text))!.text).toMatch(/no subpartition statistics/);
   });
-  test("granularity ALL and SUBPARTITION gather subpartition statistics: more tasks, the same blocks", () => {
+  test("subpartition pass: incremental LIST costs the partition plus a subpartition; a new partition and a plain gather cost whole passes", () => {
+    const hash = run(comp), list = run({ ...comp, subpartitionType: "LIST" });
+    expect(list.blocks - hash.blocks).toBeGreaterThanOrEqual(Math.floor(B / 4)); // CP5: about B / SUB more
+    expect(list.blocks - hash.blocks).toBeLessThanOrEqual(Math.ceil(B / 4));
+    const created = run({ ...comp, subpartitionType: "LIST", newPartitions: 1, changedPartitions: 0 }); // CP4: two passes over a new partition
+    expect([created.read.subPass, created.blocks]).toEqual([1, 2 * B]);
+    const plain = run({ ...comp, subpartitionType: "RANGE", incremental: "FALSE" }); // CP8: a third pass
+    const plainHash = run({ ...comp, incremental: "FALSE" });
+    expect(plain.read.subPass).toBe(plain.read.newParts + plain.read.changedParts + plain.read.otherParts);
+    expect(plain.blocks - plainHash.blocks).toBe(Math.ceil(plain.read.subPass * B));
+    expect(stepsOf(plain).find((s) => s.id === "read")!.text).toMatch(/third full pass \(CP8\)/);
+    expect(plain.findings.some((x) => /three passes over everything/.test(x.text))).toBe(true);
+  });
+  test("granularity ALL and SUBPARTITION gather subpartition statistics: more tasks, and the subpartition pass in the blocks", () => {
     const all = run({ ...comp, callGranularity: "ALL" });
-    expect([all.blocks, all.global]).toEqual([B, "merged"]);
+    expect([all.blocks, all.global]).toEqual([Math.ceil(B * 1.25), "merged"]); // the partition plus one modified subpartition (CP5)
     const f = all.findings.find((x) => /also gathers subpartition statistics/.test(x.text))!;
     expect(f.text).toMatch(/1 partition read is 4 subpartition gathers/);
+    expect(f.basis).toMatch(/inferred/); // ALL on HASH was not run
     expect(all.findings.some((x) => /only gathers statistics for modified subpartitions/.test(x.text))).toBe(true);
-    expect(stepsOf(all).find((s) => s.id === "read")!.text).toMatch(/gathered as 4 subpartition tasks/);
+    expect(stepsOf(all).find((s) => s.id === "read")!.text).toMatch(/gathered as up to 4 subpartition tasks/);
     const sub = run({ ...comp, callGranularity: "SUBPARTITION" });
     expect(sub.global).toBe("untouched"); // like PARTITION: inferred, the level below the table only
+    expect(sub.read.subPass).toBe(0); // the partition-unit read already is the subpartition read
     expect(sub.findings.some((x) => /SUBPARTITION gathers that level only/.test(x.text))).toBe(true);
     expect(sub.fixes.join("\n")).not.toMatch(/GRANULARITY/); // the call, not the preference, asked for it
     expect(run({ ...comp, granularity: "SUBPARTITION" }).fixes.join("\n")).toMatch(/'GRANULARITY', 'AUTO'/);
-    expect(run({ ...comp, incremental: "FALSE", callGranularity: "ALL" }).findings.some((x) => /every subpartition of every partition is read/.test(x.text))).toBe(true);
+    expect(run({ ...comp, incremental: "FALSE", callGranularity: "ALL" }).findings.some((x) => /three passes over everything/.test(x.text))).toBe(true);
+    // ALL and AUTO behave the same on LIST (CP7)
+    expect(run({ ...comp, subpartitionType: "LIST", callGranularity: "ALL" }).blocks).toBe(run({ ...comp, subpartitionType: "LIST" }).blocks);
   });
-  test("ALL on a composite table does not claim where the synopses live; SUBPARTITION on a table without subpartitions is flagged", () => {
-    const all = run({ ...comp, callGranularity: "ALL" });
+  test("ALL on a composite table says what was observed about synopses; SUBPARTITION on a table without subpartitions is flagged", () => {
+    const all = run({ ...comp, subpartitionType: "LIST", callGranularity: "ALL" });
     const g = all.findings.find((x) => /only gathers statistics for modified subpartitions/.test(x.text))!;
-    expect(g.text).not.toMatch(/synopses stay at partition level/);
-    expect(g.text).toMatch(/Each partition maintains a synopsis/);
-    expect(g.basis).toMatch(/inferred/);
+    expect(g.text).toMatch(/costs the whole parent partition/);
+    expect(g.basis).toMatch(/CP4, CP5, CP6, CP7/);
     const bad = run({ ...inc, callGranularity: "SUBPARTITION" });
     expect(bad.findings.some((x) => x.level === "warn" && /without subpartitions/.test(x.text))).toBe(true);
     expect(run({ ...comp, callGranularity: "SUBPARTITION" }).findings.some((x) => /without subpartitions/.test(x.text))).toBe(false);
-    // AUTO on LIST subpartitions: the first finding already says the no-subpartition-statistics claim is an assumption
-    expect(run({ ...comp, subpartitionType: "LIST" }).findings.find((x) => /^Composite table/.test(x.text))!.text).toMatch(/assumed, as for HASH/);
-    expect(run(comp).findings.find((x) => /^Composite table/.test(x.text))!.text).not.toMatch(/assumed/);
+    // GLOBAL AND PARTITION gathers no subpartition level on LIST either
+    const gp = run({ ...comp, subpartitionType: "LIST", callGranularity: "GLOBAL AND PARTITION" });
+    expect(gp.read.subPass).toBe(0);
+    expect(gp.findings.find((x) => /^Composite table/.test(x.text))!.text).toMatch(/no subpartition statistics/);
+    expect(gp.findings.find((x) => /^Composite table/.test(x.text))!.basis).toMatch(/No subpartition level statistics are gathered/);
   });
   test("a plain table, or an unticked box, gets no composite findings", () => {
     expect(run({ ...inc }).findings.some((x) => /Composite table/.test(x.text))).toBe(false);

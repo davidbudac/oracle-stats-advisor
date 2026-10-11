@@ -122,10 +122,13 @@ SQL> @survey.sql SHOP
   calls, what creating a group costs on an incremental table (one reread, a permanent full scan with
   locked partitions), a directive whose predicates are not all equalities (a group would not be
   used), `AUTO_STAT_EXTENSIONS`, and the extension limit.
-- **Composite tables**: range-hash (and list/range) subpartitions. Under GRANULARITY AUTO the
-  lab gathered partition statistics and partition synopses only (0 of 24 subpartitions), so DML in
-  one subpartition rereads the whole parent partition (lab J); GRANULARITY SUBPARTITION and ALL also
-  gather the subpartition level, shown as extra tasks rather than extra blocks.
+- **Composite tables**: range-hash, range-list and range-range subpartitions. GRANULARITY AUTO
+  gathers the subpartition level for LIST and RANGE subpartitions (lab CP1, CP2) and not for HASH
+  (lab J, CP3: 0 of 24); synopses are partition-level in every case observed (CP4, CP7). With
+  INCREMENTAL a changed LIST or RANGE partition costs the whole parent partition plus its modified
+  subpartitions (CP5, CP6: up to twice the partition), a new partition two passes; a HASH partition
+  costs the partition only (lab J). Without INCREMENTAL a LIST or RANGE composite takes a third
+  pass for the subpartition level (CP8). GRANULARITY ALL behaves like AUTO there (CP7).
 - **A partition exchange since the last gather**: the gather reads nothing only when three things
   hold together, the empty target partition was gathered first, the staging table carried a
   table-level synopsis (INCREMENTAL TRUE, INCREMENTAL_LEVEL TABLE) and both sides have the same
@@ -186,8 +189,9 @@ sentences). The checks are heuristics over the dictionary, not a proof that a pl
 - The estimates are an explanatory model supported by 19.27 lab observations, not an I/O
   predictor for every release update. The collector's table DML percentage is used when
   available; partition change percentages and block counts remain aggregates.
-- Not run on the lab, so inferred or taken from the documentation: GRANULARITY AUTO on LIST and
-  RANGE subpartitions (the lab has HASH only), everything about the high-frequency task, the
+- Not run on the lab, so inferred or taken from the documentation: GRANULARITY ALL or SUBPARTITION on
+  HASH subpartitions, LIST-LIST and other composites that are not range-x, `partname` with a
+  subpartition name, everything about the high-frequency task, the
   interplay of real-time statistics with gathers, job-driven partition exchange, the real nightly
   task (schema `GATHER AUTO` stood in for it).
 - Health check: `DBA_INDEX_USAGE` is sampled (`_iut_stat_collection_type` = SAMPLED, flushed about
