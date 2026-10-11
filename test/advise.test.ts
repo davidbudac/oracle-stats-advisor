@@ -343,6 +343,19 @@ describe("composite tables (lab J)", () => {
     expect(run({ ...comp, granularity: "SUBPARTITION" }).fixes.join("\n")).toMatch(/'GRANULARITY', 'AUTO'/);
     expect(run({ ...comp, incremental: "FALSE", callGranularity: "ALL" }).findings.some((x) => /every subpartition of every partition is read/.test(x.text))).toBe(true);
   });
+  test("ALL on a composite table does not claim where the synopses live; SUBPARTITION on a table without subpartitions is flagged", () => {
+    const all = run({ ...comp, callGranularity: "ALL" });
+    const g = all.findings.find((x) => /only gathers statistics for modified subpartitions/.test(x.text))!;
+    expect(g.text).not.toMatch(/synopses stay at partition level/);
+    expect(g.text).toMatch(/Each partition maintains a synopsis/);
+    expect(g.basis).toMatch(/inferred/);
+    const bad = run({ ...inc, callGranularity: "SUBPARTITION" });
+    expect(bad.findings.some((x) => x.level === "warn" && /without subpartitions/.test(x.text))).toBe(true);
+    expect(run({ ...comp, callGranularity: "SUBPARTITION" }).findings.some((x) => /without subpartitions/.test(x.text))).toBe(false);
+    // AUTO on LIST subpartitions: the first finding already says the no-subpartition-statistics claim is an assumption
+    expect(run({ ...comp, subpartitionType: "LIST" }).findings.find((x) => /^Composite table/.test(x.text))!.text).toMatch(/assumed, as for HASH/);
+    expect(run(comp).findings.find((x) => /^Composite table/.test(x.text))!.text).not.toMatch(/assumed/);
+  });
   test("a plain table, or an unticked box, gets no composite findings", () => {
     expect(run({ ...inc }).findings.some((x) => /Composite table/.test(x.text))).toBe(false);
     expect(run({ partitioned: false, subpartitioned: true }).input.subpartitioned).toBe(false);
@@ -365,7 +378,7 @@ describe("a partition exchanged in since the last gather", () => {
     expect(run({ ...ex, ...all3, newPartitions: 0, changedPartitions: 2 }).partitionsRead).toBe(1);
   });
   test("each missing condition makes the exchanged partition a reread (lab H1, H3, H6, H7)", () => {
-    for (const [key, id] of [["exchangeTargetGathered", /H1, H2, H3/], ["exchangeStageSynopsis", /H3, H4, H7/], ["exchangeHistogramsMatch", /H6/]] as const) {
+    for (const [key, id] of [["exchangeTargetGathered", /H2 against H5/], ["exchangeStageSynopsis", /H7 against H5/], ["exchangeHistogramsMatch", /H6/]] as const) {
       const o = run({ ...ex, ...all3, [key]: false });
       expect([o.partitionsRead, o.blocks, o.verdict[0]]).toEqual([1, B, "warn"]);
       const w = o.findings.find((f) => f.level === "warn" && /The exchanged partition is read again/.test(f.text))!;
@@ -422,6 +435,10 @@ describe("real-time statistics", () => {
     const f = rt.findings.find((x) => /STATS_ON_CONVENTIONAL_DML/.test(x.text))!;
     expect(f.text).toMatch(/augment rather than replace traditional statistics/);
     expect(f.text).toMatch(/no NDV, histogram, index statistics or synopsis/);
+    expect(f.text).toMatch(/most essential statistics/);
+    expect(f.text).toMatch(/STATS_ON_CONVENTIONAL_LOAD/); // the Database Reference names the other value
+    expect(f.text).not.toMatch(/row and block counts/);
+    expect(verifySql(rt)).toMatch(/LIKE '%STATS_ON_CONVENTIONAL%'/);
     expect(f.basis).toMatch(/Real-Time Statistics/);
     const lic = rt.findings.find((x) => x.level === "warn" && /Table 1-8 Performance/.test(x.text))!;
     expect(lic.text).toMatch(/Available on Exadata\. Not available on Oracle Database Appliance\./);
@@ -463,6 +480,13 @@ describe("the high-frequency automatic task", () => {
     const lic = o.findings.find((x) => x.level === "warn" && /High-Frequency Automatic Optimizer Statistics Collection/.test(x.text))!;
     expect(lic.text).toMatch(/Available on Exadata\. Not available on Oracle Database Appliance\./);
     expect(verifySql(o)).toMatch(/dba_auto_stat_executions/);
+    // named columns of DBA_AUTO_STAT_EXECUTIONS (lab 19.27), not SELECT *; ORIGIN values from the Database Reference
+    expect(verifySql(o)).toMatch(/SELECT opid, origin, status, start_time, end_time, completed, failed, timed_out, in_progress/);
+    expect(verifySql(o)).not.toMatch(/SELECT \*/);
+    expect(verifySql(o)).toMatch(/HIGH_FREQ_AUTO_TASK/);
+    expect(f.text).toMatch(/varies among Oracle Database platforms/);
+    expect(inferred.text).not.toMatch(/Both tasks share/);
+    expect(inferred.text).toMatch(/no statistics at all/);
   });
   test("runBy hf with the task OFF: a warning and the SET_GLOBAL_PREFS fix; ON beside another run mode: a note", () => {
     const off = run({ ...flat, runBy: "hf", tableChangePercent: 12 });

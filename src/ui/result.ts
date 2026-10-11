@@ -4,6 +4,7 @@ import type { Input } from "../model/defaults";
 import { stepsOf, verifySql } from "../model/advise";
 import type { Level, Outcome, Source } from "../model/types";
 import type { SetupScripts } from "../model/setup";
+import type { HealthReport, HealthSection } from "../model/health";
 import { copyButton, el, highlightSql } from "./dom";
 import { stackBar, type Segment } from "./stackbar";
 
@@ -18,7 +19,42 @@ const SYNOPSES_LABEL: Record<Outcome["synopsesAfter"], string> = {
 const NOTES_LABEL: Record<string, string> = { INCREMENTAL: "INCREMENTAL", HYPERLOGLOG: "HYPERLOGLOG", "": "(blank)" };
 const LEVEL_LABEL: Record<Level, string> = { good: "Good", warn: "Warning", bad: "Problem", info: "Note" };
 const SOURCE_LABEL: Record<Source, string> = { call: "the call", preference: "a preference", default: "Oracle's default", ignored: "preference (call ignored)", job: "the job's preferences" };
+const HEALTH_HINT = "Paste the output of the current collect.sql to add the health check (histograms, extended statistics, indexes, staleness forecast, gather history, pending and restorable statistics).";
 const STATUS_LABEL = { does: "runs", skips: "skipped", stops: "stops", note: "then" } as const;
+
+/** One finding as a list item: level badge, text, basis. Shared by the advice findings and the health check. */
+function findingItem(f: { level: Level; text: string; basis: string }): HTMLElement {
+  return el("li", { class: "finding" }, [
+    el("span", { class: `verdict ${f.level}` }, LEVEL_LABEL[f.level]), " ", f.text, " ", el("small", { class: "basis" }, `Basis: ${f.basis}.`),
+  ]);
+}
+
+/** "3 problems, 5 warnings", with the class of the worst level; nothing to fix reads as good. */
+export function healthCount(report: HealthReport): { text: string; level: Level } {
+  if (!report.sections.length) return { text: "nothing could be checked", level: "info" };
+  const all = report.sections.flatMap((s) => s.findings);
+  const bad = all.filter((f) => f.level === "bad").length, warn = all.filter((f) => f.level === "warn").length;
+  const parts = [bad ? plural(bad, "problem") : "", warn ? plural(warn, "warning") : ""].filter(Boolean);
+  return { text: parts.length ? parts.join(", ") : "no problems or warnings", level: bad ? "bad" : warn ? "warn" : "good" };
+}
+
+function healthSection(s: HealthSection): HTMLElement {
+  const fixes = s.findings.flatMap((f) => f.fix ?? []);
+  const fixCode = el("code", { html: highlightSql(fixes.join("\n")) });
+  return el("div", { class: "hsec", "data-section": s.id }, [
+    el("h4", {}, s.title),
+    el("p", { class: "hsum" }, s.summary),
+    s.findings.length ? el("ul", { class: "findings" }, s.findings.map(findingItem)) : null,
+    s.rows && s.rows.body.length ? el("table", { class: "resolved hrows" }, [
+      el("thead", {}, el("tr", {}, s.rows.head.map((h) => el("th", {}, h)))),
+      el("tbody", {}, s.rows.body.map((r) => el("tr", {}, r.map((c) => el("td", {}, c))))),
+    ]) : null,
+    fixes.length ? el("div", { class: "hfix" }, [
+      el("div", { class: "hfix-head" }, [el("span", { class: "hlabel" }, "What to change"), copyButton(() => fixCode.textContent ?? "")]),
+      el("pre", { class: "sql" }, fixCode),
+    ]) : null,
+  ]);
+}
 
 export function createResult(root: Document | HTMLElement) {
   const $ = <T extends HTMLElement = HTMLElement>(sel: string) => root.querySelector(sel) as T;
@@ -79,15 +115,15 @@ export function createResult(root: Document | HTMLElement) {
   function render(o: Outcome, clampNotes: string[], input: Input) {
     const N = input.partitions, B = input.blocksPerPartition, T = N * B;
     const nx = o.next;
-    const auto = input.runBy === "auto";
+    const job = input.runBy !== "call", nextRun = input.runBy === "hf" ? "high-frequency task run" : "job run";
     const total = Math.max(2 * T, o.blocks, nx?.blocks ?? 0);
     nowBar.update(segs(o), total, indexNote(o));
     nextBar.update(nx ? segs(nx) : [], total, nx ? indexNote(nx) : undefined);
-    $("#bar-next-h").textContent = auto ? "The next job run" : "The next plain gather";
+    $("#bar-next-h").textContent = job ? `The next ${nextRun}` : "The next plain gather";
 
     $("#verdict").replaceChildren(
       el("span", { class: `verdict ${o.verdict[0]}` }, o.verdict[1]),
-      el("span", { class: "verdict-sub" }, o.error ? ` ${o.error}: nothing is read.` : ` Reads ${fmt(o.blocks)} blocks now${nx ? `, ${fmt(nx.blocks)} at the next ${auto ? "job run" : "plain gather"}` : ""}.`),
+      el("span", { class: "verdict-sub" }, o.error ? ` ${o.error}: nothing is read.` : ` Reads ${fmt(o.blocks)} blocks now${nx ? `, ${fmt(nx.blocks)} at the next ${job ? nextRun : "plain gather"}` : ""}.`),
     );
     $("#names-note").hidden = !!(input.owner && input.tableName);
     $("#pmap").replaceChildren(partitionMap(o));
@@ -95,7 +131,7 @@ export function createResult(root: Document | HTMLElement) {
     const row = (dt: string, dd: Node | string, cls = "") => el("div", {}, [el("dt", {}, dt), el("dd", { class: cls }, dd)]);
     $("#readout").replaceChildren(
       row("Read by this gather", blocks(o), "est"),
-      row(auto ? "Read by the next job run" : "Read by the next plain gather", nx ? blocks(nx) : "–"),
+      row(job ? `Read by the next ${nextRun}` : "Read by the next plain gather", nx ? blocks(nx) : "–"),
       input.partitioned ? row("Partitions read now", `${fmt(o.partitionsRead)} of ${fmt(N)}`) : row("Scan", o.scan.kind === "none" ? "none" : o.scan.kind === "full" ? "full, every row" : `${o.scan.kind.replace("-", " ")} ${fmt(o.scan.percent ?? 0, 6)}%`),
       input.partitioned ? row("Global statistics afterwards", GLOBAL_LABEL[o.global]) : row("NDV", o.columns.ndv.split(".")[0] ?? ""),
       input.partitioned ? row("Synopses afterwards", SYNOPSES_LABEL[o.synopsesAfter]) : row("Histograms", o.columns.kinds.length ? o.columns.kinds.map((k) => k.split(",")[0]).join(", ") : o.columns.deleted ? "deleted" : "none built"),
@@ -127,9 +163,7 @@ export function createResult(root: Document | HTMLElement) {
       ]))),
     );
 
-    $("#findings").replaceChildren(...o.findings.map((f) => el("li", { class: "finding" }, [
-      el("span", { class: `verdict ${f.level}` }, LEVEL_LABEL[f.level]), " ", f.text, " ", el("small", { class: "basis" }, `Basis: ${f.basis}.`),
-    ])));
+    $("#findings").replaceChildren(...o.findings.map(findingItem));
     sqlCode.innerHTML = highlightSql(o.sql);
     const fixText = [...(o.fixes.length ? o.fixes : ["-- nothing to change"]), "", "-- reads nothing: lists what the next gather would read", o.dryRun].join("\n");
     fixCode.innerHTML = highlightSql(fixText);
@@ -148,7 +182,7 @@ export function createResult(root: Document | HTMLElement) {
     if (!c) return;
     const { yours, rec, scripts } = c;
     const n = scripts.changed.length;
-    const auto = yours.input.runBy === "auto";
+    const job = yours.input.runBy !== "call", nextRun = yours.input.runBy === "hf" ? "high-frequency task run" : "job run";
     const assumesSynopses = yours.input.partitioned && yours.input.synopses !== "all";
     $("#compare-note").textContent = (n
       ? `The recommended setup changes ${n === 1 ? "one preference" : `${n} preferences`}; everything else is your setup. Switch between the two at the top of the page.`
@@ -163,7 +197,7 @@ export function createResult(root: Document | HTMLElement) {
       el("tbody", {}, [
         row("Verdict", pill(yours), pill(rec)),
         row("Read by this gather", blocks(yours), blocks(rec)),
-        row(auto ? "Read by the next job run" : "Read by the next plain gather", next(yours), next(rec)),
+        row(job ? `Read by the next ${nextRun}` : "Read by the next plain gather", next(yours), next(rec)),
         yours.input.partitioned ? row("Global statistics afterwards", GLOBAL_LABEL[yours.global], GLOBAL_LABEL[rec.global]) : null,
         ...scripts.diff.map((d) => row(el("code", {}, d.name), el("code", {}, d.before ?? "NULL"), el("code", {}, d.after || "NULL"))),
       ]),
@@ -176,5 +210,31 @@ export function createResult(root: Document | HTMLElement) {
     applyCode.innerHTML = highlightSql(scripts.apply);
     rollbackCode.innerHTML = highlightSql(scripts.rollback);
   }
-  return { render, showCompare };
+  /**
+   * The health check of the real table, from the collector's DETAIL block. null (no block pasted)
+   * hides the block and shows the hint under the findings. `recommended` says the form shows the
+   * recommended setup, which the report does not describe.
+   */
+  function renderHealth(report: HealthReport | null, input: Input, recommended = false) {
+    const block = $("#health"), hint = $("#health-hint");
+    hint.textContent = HEALTH_HINT;
+    hint.hidden = !!report;
+    block.hidden = !report;
+    if (!report) { $("#health-body").replaceChildren(); return; }
+    const count = healthCount(report);
+    const badge = $("#health-count");
+    badge.className = `verdict ${count.level}`;
+    badge.textContent = count.text;
+    const table = input.owner && input.tableName ? `${input.owner}.${input.tableName}` : "the pasted table";
+    $("#health-lead").textContent = `From collect.sql run${report.collectedAt ? ` at ${report.collectedAt}` : ""} on ${table}.`
+      + (recommended ? " This describes the table as it is now, not the recommended setup." : "");
+    $("#health-body").replaceChildren(
+      ...report.sections.map(healthSection),
+      ...(report.skipped.length ? [el("details", { class: "deep hskipped" }, [
+        el("summary", {}, `Not checked: ${plural(report.skipped.length, "section")}`),
+        el("ul", {}, report.skipped.map((x) => el("li", {}, x))),
+      ])] : []),
+    );
+  }
+  return { render, showCompare, renderHealth };
 }

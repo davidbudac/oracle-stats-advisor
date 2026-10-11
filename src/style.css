@@ -245,6 +245,19 @@ small { font-size: 0.85em; }
 .compare code { overflow-wrap: anywhere; }
 .findings { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--sp-2); }
 .finding { font-size: 0.9rem; padding: var(--sp-3) var(--sp-4); background: var(--sunk); border: 1px solid var(--rule); border-radius: var(--r); }
+/* health check of the real table: one sub-block per rule section */
+#health-count { margin-inline-start: var(--sp-2); font-size: 0.78rem; vertical-align: 0.1em; }
+.hsec { margin-block-start: var(--sp-5); display: grid; gap: var(--sp-3); align-content: start; }
+.hsec > * { margin-block: 0; min-inline-size: 0; }
+.hsec h4 { font-size: 0.95rem; color: var(--ink); }
+.hsum { font-size: 0.875rem; color: var(--ink-2); }
+.hrows { display: block; overflow-x: auto; inline-size: auto; max-inline-size: 100%; font-size: 0.8rem; }
+.hrows th, .hrows td { padding-block: var(--sp-1); white-space: nowrap; }
+.hfix { position: relative; }
+.hfix-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); margin-block-end: var(--sp-2); }
+.hlabel { font-size: 0.78rem; font-weight: 600; color: var(--ink-2); }
+.hskipped { font-size: 0.82rem; color: var(--ink-2); }
+.hskipped ul { list-style: none; padding-inline-start: 0; }
 .sqlgrid { display: grid; grid-template-columns: 1fr; gap: var(--sp-4); }
 @media (min-width: 60rem) { .sqlgrid { grid-template-columns: 1fr 1fr; } .sqlgrid .wide { grid-column: 1 / -1; } }
 .sqlgrid > div { position: relative; min-inline-size: 0; }

@@ -75,8 +75,8 @@ export const GROUPS: Group[] = [
     { key: "autoStatExtensions", type: "select", label: "AUTO_STAT_EXTENSIONS" },
     { key: "hfTask", type: "select", label: "AUTO_TASK_STATUS (global: the high-frequency task)" },
     { key: "hfInterval", type: "number", label: "AUTO_TASK_INTERVAL, seconds", min: 60, step: 1, show: showHf, hint: "minimum 60, default 900" },
-    { key: "hfMaxRunTime", type: "number", label: "AUTO_TASK_MAX_RUN_TIME, seconds", min: 1, max: 3600, step: 1, show: showHf, hint: "maximum and default 3600" },
-    { key: "realTimeStats", type: "check", label: "Real-time statistics are on (optimizer_real_time_statistics; Exadata and cloud only in 19c)" },
+    { key: "hfMaxRunTime", type: "number", label: "AUTO_TASK_MAX_RUN_TIME, seconds", min: 1, max: 3600, step: 1, show: showHf, hint: "maximum 3600 (Tuning Guide: also the default; the DBMS_STATS reference: the default varies by platform)" },
+    { key: "realTimeStats", type: "check", label: "Real-time statistics are on (optimizer_real_time_statistics; licensed for Exadata and Exadata Cloud only in 19c)" },
   ] },
   { id: "call", legend: "The gather", fields: [
     { key: "runBy", type: "select", label: "Run by" },

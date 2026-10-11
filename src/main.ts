@@ -1,5 +1,5 @@
 import "./style.css";
-import { DEFAULTS, PREF_OF_FIELD, PRESETS, RECOMMENDED, STRINGS, advise, clampInput, decodeInput, encodeInput, parsePrefs, setupScripts, type Input, type Provenance } from "./model";
+import { DEFAULTS, health, PREF_OF_FIELD, PRESETS, RECOMMENDED, STRINGS, advise, clampInput, decodeInput, encodeInput, parsePrefs, plural, setupScripts, type Detail, type Input, type Provenance } from "./model";
 import { buildForm } from "./ui/form";
 import { createResult } from "./ui/result";
 import { el } from "./ui/dom";
@@ -33,6 +33,8 @@ let current: Input = { ...DEFAULTS };
 let lastHash: string | null = null;
 // what the last paste said beyond the form (exact preference texts, table-level list, histogram columns); null until a paste fills the form
 let loaded: Provenance | null = null;
+// the DETAIL block of that paste (the real table's columns, indexes, history); it belongs to the pasted table, never to the hash
+let loadedDetail: Detail | null = null;
 // "Use the recommended setup" opens a second view; the form keeps your setup and the recommended one is derived from it
 let recOpen = false;
 let view: "yours" | "rec" = "yours";
@@ -66,6 +68,7 @@ function render(input: Input, clampNotes: string[]) {
     $("#views-count").textContent = scripts.changed.length ? `· ${scripts.changed.length} changed` : "· same";
     for (const k of keys) ctl[k]?.wrap.classList.toggle("diff", input[k] !== rec[k]);
   } else result.showCompare(null);
+  result.renderHealth(loadedDetail ? health(input, loadedDetail, loaded) : null, input, shown !== input);
   const hash = encodeInput(input);
   if (hash !== lastHash) {
     lastHash = hash;
@@ -109,7 +112,7 @@ $("#recommended").addEventListener("click", () => {
 $("#view-yours").addEventListener("click", () => showView("yours"));
 $("#view-rec").addEventListener("click", () => showView("rec"));
 $("#view-back").addEventListener("click", () => showView("yours"));
-$("#reset").addEventListener("click", () => { loaded = null; apply({ ...DEFAULTS, owner: current.owner, tableName: current.tableName }); });
+$("#reset").addEventListener("click", () => { loaded = null; loadedDetail = null; apply({ ...DEFAULTS, owner: current.owner, tableName: current.tableName }); });
 
 // ---- presets
 {
@@ -118,7 +121,7 @@ $("#reset").addEventListener("click", () => { loaded = null; apply({ ...DEFAULTS
   sel.addEventListener("change", () => {
     const p = PRESETS.find((x) => x.id === sel.value);
     $("#preset-blurb").textContent = p ? p.blurb : "";
-    if (p) { loaded = null; apply({ ...DEFAULTS, owner: current.owner, tableName: current.tableName, ...p.values }); }
+    if (p) { loaded = null; loadedDetail = null; apply({ ...DEFAULTS, owner: current.owner, tableName: current.tableName, ...p.values }); }
   });
 }
 
@@ -129,11 +132,13 @@ $("#reset").addEventListener("click", () => { loaded = null; apply({ ...DEFAULTS
     const r = parsePrefs(paste.value);
     if (!r.recognised.length && !r.ignored.length) { parsed.replaceChildren("Nothing to read yet. Paste the block from collect.sql, or SET_TABLE_PREFS calls, DBA_TAB_STAT_PREFS rows, NAME = VALUE lines or the GET_PREFS output."); return; }
     loaded = r.provenance;
+    loadedDetail = r.detail;
     apply(r.values);
     parsed.replaceChildren(
       el("strong", {}, "Recognised: "), `${r.recognised.length ? r.recognised.join(", ") : "nothing"}. `,
       ...(r.ignored.length ? [el("strong", {}, "Ignored: "), `${r.ignoredDetail.map((d) => `${d.line} (${d.reason})`).join("; ")}. `] : []),
       r.notes.join(" "),
+      ...(r.detailIgnored.length ? [` Detail block: ${plural(r.detailIgnored.length, "line")} ignored.`] : []),
     );
   });
 }
