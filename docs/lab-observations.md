@@ -178,3 +178,33 @@ AUTO_SAMPLE_SIZE, METHOD_OPT FOR ALL COLUMNS SIZE AUTO, PREFERENCE_OVERRIDES_PAR
   stays USABLE after the gather.
 - SALES (partitioned, 35 partitions) has the lab's `(STATUS, PRODUCT_ID)` group from E4 and a directive on
   (SALE_DATE, STATUS) with `equality_predicates_only = NO`: reported as `|directive|range|6108` and not counted.
+
+## Dictionary observations (2026-10-11, 19.27)
+
+Read-only queries behind the collector's DETAIL block and the health check (PDB1, STATS_LAB, ORASTATS_TEST, SOE). The lab
+database could not be modified in this session, so nothing below was gathered or changed.
+
+- Q1 `DBA_OPTSTAT_OPERATION_TASKS.TARGET` is `"OWNER"."TABLE"` for a table task and `"OWNER"."TABLE"."PART"` for a partition task, with
+  the double quotes. Task `NOTES` carry `<notes><histograms>A;B;</histograms><xstats>...</xstats></notes>`.
+- Q2 The automatic job's row in `DBA_OPTSTAT_OPERATIONS` is `gather_database_stats (auto)` with `JOB_NAME` like `ORA$AT_OS_OPT_SY_n`.
+  Its task rows have an empty `JOB_NAME`, so the job is identified from the operation row. Task rows can be duplicated.
+- Q3 `DBA_TAB_MODIFICATIONS` for a composite table (STATS_LAB.C1) has only subpartition rows. For partitioned tables it varies:
+  SOE.ORDER_ITEMS has a table roll-up row (5.3%, agreeing with `STALE_STATS = NO`, so summing the roll-up and the partition rows
+  double-counts to 10.7%); STATS_LAB.A1 has partition rows only.
+- Q4 STATS_LAB.C1 (range-hash, 6 x 4) under GRANULARITY AUTO: 6 of 6 partitions analysed, 0 of 24 subpartitions (agrees with J).
+- Q5 Function-based-index hidden virtual columns appear in `DBA_STAT_EXTENSIONS` with `CREATOR = SYSTEM` and have column statistics
+  (SOE.CUSTOMERS, `LOWER(CUST_LAST_NAME)`). The collector's column-group count therefore excludes expression extensions.
+- Q6 `DBA_AUTO_STAT_EXECUTIONS` lists the nightly task's runs too, with `ORIGIN = AUTO_TASK`; the high-frequency task would be
+  `HIGH_FREQ_AUTO_TASK` (none ran).
+- Q7 `optimizer_real_time_statistics` exists in 19.27, default FALSE. `AUTO_TASK_STATUS` OFF, `AUTO_TASK_INTERVAL` 900,
+  `AUTO_TASK_MAX_RUN_TIME` 3600 are the global defaults.
+- Q8 `_iut_stat_collection_type` = SAMPLED. `V$INDEX_USAGE_INFO` documents SAMPLED and the 15-minute flush, so `DBA_INDEX_USAGE`
+  is a sample: an index with no row is unseen, not proven unused.
+- Q9 All five histogram kinds exist: ORASTATS_TEST.CAL_HB_FULL.C is HEIGHT BALANCED.
+- Q10 Maintenance windows: MONDAY to FRIDAY_WINDOW start 22:00 and last 4 h; SATURDAY_WINDOW and SUNDAY_WINDOW start 06:00 and last
+  20 h; WEEKNIGHT_WINDOW and WEEKEND_WINDOW exist but are disabled.
+
+Not verified here (listed as limits in `docs/oracle19c-review.md`): GRANULARITY AUTO on LIST or RANGE subpartitions (the lab has
+HASH only); anything the high-frequency task does (it did not run); real-time statistics beside gathers (not available on the
+lab); a job-driven partition exchange; the expression candidates from `V$SQL_PLAN` (the regex found no positive case on the lab
+tables); the missing-privilege path of `REPORT_COL_USAGE` as a non-SYSDBA user.

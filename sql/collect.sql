@@ -71,8 +71,9 @@
 --                             global HISTOGRAM is NONE (statement 2); else none
 --   COLUMN_USAGE              1 when REPORT_COL_USAGE lists at least one column
 --   AUTO_STAT_EXTENSIONS      the preference in force: ON lets a SQL plan directive make the gather create a column group
---   COLUMN_GROUPS             extensions that are column groups (DBA_STAT_EXTENSIONS, extension text starting with
---                             a parenthesis); COLUMN_GROUP_LIST names them. An extension without statistics (created
+--   COLUMN_GROUPS             extensions that are column groups (DBA_STAT_EXTENSIONS, extension text a parenthesis around
+--                             two or more column names and nothing else, the rule of the DETAIL EXTENSION kind; an
+--                             expression such as (UPPER("T")) is not a group); COLUMN_GROUP_LIST names them. An extension without statistics (created
 --                             since the last gather) also sets COLUMN_CHANGE = group
 --   COLUMN_GROUP_CANDIDATES   statement 4: column sets of two or more columns a USABLE DYNAMIC_SAMPLING directive
 --                             (DBA_SQL_PLAN_DIRECTIVES, DBA_SQL_PLAN_DIR_OBJECTS) misestimated and no column group
@@ -239,10 +240,12 @@ WITH p AS (
                          AND    cs.histogram IS NOT NULL AND cs.histogram <> 'NONE'
                          AND    cs.notes LIKE '%HIST_FOR_INCREM_STATS%')) AS hist_support,
          (SELECT COUNT(*) FROM dba_stat_extensions e
-          WHERE  e.owner = tb.own AND e.table_name = tb.tab AND DBMS_LOB.SUBSTR(e.extension, 1, 1) = '(') AS n_cg,
+          WHERE  e.owner = tb.own AND e.table_name = tb.tab
+          AND    REGEXP_LIKE(DBMS_LOB.SUBSTR(e.extension, 4000, 1), '^\(\s*"[^"]+"(\s*,\s*"[^"]+")+\s*\)$')) AS n_cg,
          (SELECT LISTAGG(REPLACE(REPLACE(DBMS_LOB.SUBSTR(e.extension, 4000, 1), '"', ''), ' ', ''), '; ' ON OVERFLOW TRUNCATE) WITHIN GROUP (ORDER BY e.extension_name)
           FROM   dba_stat_extensions e
-          WHERE  e.owner = tb.own AND e.table_name = tb.tab AND DBMS_LOB.SUBSTR(e.extension, 1, 1) = '(') AS cg_list,
+          WHERE  e.owner = tb.own AND e.table_name = tb.tab
+          AND    REGEXP_LIKE(DBMS_LOB.SUBSTR(e.extension, 4000, 1), '^\(\s*"[^"]+"(\s*,\s*"[^"]+")+\s*\)$')) AS cg_list,
          (SELECT COUNT(*) FROM dba_stat_extensions e
           WHERE  e.owner = tb.own AND e.table_name = tb.tab
           AND    NOT EXISTS (SELECT 1 FROM dba_tab_col_statistics c

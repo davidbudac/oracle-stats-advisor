@@ -54,6 +54,8 @@ below. It does not certify exact gather behavior for every table or release upda
 
 ## Remaining limits
 
+This is the one list; the extension review below adds to it.
+
 - The nightly job, AUTO_CASCADE selection, internal histogram work and synopsis format
   changes are not precisely predictable from these fields. `force` with individual partition
   locks remains unverified; the model flags that combination. Non-incremental
@@ -68,8 +70,23 @@ below. It does not certify exact gather behavior for every table or release upda
   is conventional unquoted identifiers; quoted mixed-case or punctuation-containing names
   need adaptation. The histogram list parser likewise assumes simple column names.
   Very long column lists can exceed LISTAGG/ODCIVARCHAR2LIST limits.
-- Composite partitions, temporary/external/index-organized tables, domain or partitioned
-  global indexes, partition exchange and real-time statistics are outside this model.
+- Outside the model: temporary, external and index-organized tables, domain indexes, partitioned
+  global indexes, `partname` with a subpartition name, degree and concurrency (shown, not
+  modelled).
+- Not run on the lab (updated 2026-10-11), so inferred or documentation-only: GRANULARITY AUTO on
+  LIST and RANGE subpartitions (the lab has HASH only, and the lab database could not be modified
+  in the extension review); everything the high-frequency task does (it never ran; the lab has
+  `AUTO_TASK_STATUS` OFF); real-time statistics beside gathers (not available on the lab);
+  job-driven partition exchange (lab H and V3 used explicit calls).
+- Health check: it works on dictionary heuristics, developed against one 19.27 lab database.
+  `DBA_INDEX_USAGE` is sampled (`_iut_stat_collection_type` = SAMPLED, 15-minute flush), so "unused"
+  is a hint. Expression candidates come from `V$SQL_PLAN`, so only from cached plans (weak
+  evidence); the regex found no positive case on the lab tables. DML counters are flushed
+  periodically, so the staleness forecast is as current as the last flush. The missing-privilege
+  path of `REPORT_COL_USAGE` in the collector was not tested as a non-SYSDBA user.
+- Real-time statistics and the high-frequency task are licensed only for Exadata and Exadata Cloud
+  in 19c (Licensing Information, Table 1-8), although the parameter and preferences exist on every
+  edition. The page says so; it does not detect the edition.
 - Dictionary reads need access to the DBA views. Package reports can additionally require
   ownership or `ANALYZE ANY`; dictionary objects have stronger requirements. Merely granting
   SELECT_CATALOG_ROLE and EXECUTE on DBMS_STATS does not grant every reporting privilege.
@@ -148,6 +165,49 @@ Still open: statement 3 allows one minute between a partition's LAST_ANALYZED an
 (every lab synopsis matched to the second); statement 1's guess cannot tell the INCREMENTAL-toggled
 case (lab L1) from the locked case when both apply; `group# = 2 * object_id` is an undocumented
 mapping of the synopsis table, verified on 19.27 only.
+
+## Extension review — 2026-10-11
+
+Added in `ce5efea` and `ec8ba71` (and the fixes after them):
+
+- **Collector detail block.** `collect.sql` prints a second block, `ADVISOR DETAIL BEGIN/END` (statements
+  7 to 28): per-column statistics with histograms, usage and low/high values; per-index statistics with
+  `DBA_INDEX_USAGE`; extensions; gather history from `DBA_OPTSTAT_OPERATIONS` / `_OPERATION_TASKS`;
+  maintenance windows and automatic-task runs; high-frequency task runs; per-partition rows;
+  expression candidates from `V$SQL_PLAN`; pending, retention and SYSAUX facts. The format and its
+  rules are in `design-health.md`; `src/model/detail.ts` parses it and never throws on a bad line.
+- **Health check.** `src/model/health/` turns the rows into sections (histograms, extended
+  statistics, indexes, statistics quality, staleness forecast, gather history, pending statistics,
+  restore and compare, bulk-load statistics, real-time statistics, subpartitions), each finding with
+  a `basis`. The result pane renders them under the findings and lists skipped sections.
+- **Form scenarios.** Composite tables and GRANULARITY SUBPARTITION; a partition exchange since the
+  last gather (three conditions for a no-read gather: lab H2, H5, H6, H7, V3, Tg); real-time
+  statistics; the high-frequency task (`runBy = hf`, `AUTO_TASK_STATUS` / `_INTERVAL` / `_MAX_RUN_TIME`);
+  pending statistics (test, compare, publish, delete recipe); bulk-load statistics (`STATS_ON_LOAD`,
+  GATHER AUTO). Seven new presets.
+- **`sql/survey.sql`** ranks a schema's tables by the blocks the next plain gather would read.
+- **Collector fixes.** DML counters for composite tables (`DBA_TAB_MODIFICATIONS` has only
+  subpartition rows there) and for tables without a roll-up row (the roll-up is not added to the
+  partition rows: that double-counts); `COLUMN_GROUPS` no longer counts expression extensions.
+
+How it was verified:
+
+1. **Fact sheet.** `oracle19c-facts.md` quotes the 19c sentences (URL and section) for every
+   documentation claim and marks what the documentation does not say. Appendix A lists assumptions
+   the pages do not support.
+2. **Lab fixtures.** The collector was run on 19.27 against STATS_LAB.SALES, C1, CG1,
+   ORASTATS_TEST.EXPR_PRED and ORDERS; the outputs are the parser fixtures in `test/fixtures/`
+   (`survey.sql`: `survey-STATS_LAB.txt`). The dictionary facts found on the way are in
+   `lab-observations.md`, "Dictionary observations (2026-10-11, 19.27)".
+3. **Reviewer pass** of `ce5efea` against the documentation (`ec8ba71`): the exchange lab ids were
+   split per condition (H2/H7/H6 versus H5); the claim that GRANULARITY ALL / SUBPARTITION builds
+   subpartition synopses was withdrawn (the documentation is silent); the real-time statistics
+   wording follows the documentation (both NOTES values, "most essential statistics");
+   `AUTO_TASK_MAX_RUN_TIME` cites both Oracle pages, which disagree (maximum versus default 3600);
+   the high-frequency verify SQL uses documented columns; licensing wording follows Table 1-8.
+
+Not checked: the missing-privilege paths of the detail statements as a non-SYSDBA user; the rules on a
+database other than the lab; anything listed under "Remaining limits" as not run.
 
 ## Oracle references
 

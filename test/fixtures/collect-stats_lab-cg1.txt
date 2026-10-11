@@ -1,7 +1,7 @@
 
 Session altered.
 
--- Gather advisor input for STATS_LAB.CG1, collected 2026-10-11 08:15:07
+-- Gather advisor input for STATS_LAB.CG1, collected 2026-10-11 08:23:53
 -- paste everything from BEGIN to END (the whole output is fine) into the advisor
 -- ADVISOR INPUT BEGIN
 OWNER = STATS_LAB
@@ -71,7 +71,7 @@ COLUMN_GROUP_USAGE_LIST = CITY,COUNTRY,STATUS|usage|eq|1000
 -- ADVISOR INPUT END
 -- ADVISOR DETAIL BEGIN
 DETAIL_VERSION = 1
-COLLECTED_AT = 2026-10-11 08:15:08
+COLLECTED_AT = 2026-10-11 08:23:54
 DB_VERSION = 19.27.0.0.0
 OPTIMIZER_USE_PENDING_STATISTICS = FALSE
 REALTIME_STATS_PARAM = FALSE
@@ -147,7 +147,7 @@ HFRUN = 3841|2026-10-05 05:08:30|2026-10-05 05:08:36|COMPLETED|76|1|0|AUTO_TASK
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 | Operation Id | Operation                           | Target            | Start Time | End Time | Status | Total Tasks | Successful Tasks | Failed Tasks | Active Tasks                              |
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-| 4746         | gather_table_stats (reporting mode) | "STATS_LAB"."CG1" |            |          |        | 1           |                  |              |                                           |
+| 4749         | gather_table_stats (reporting mode) | "STATS_LAB"."CG1" |            |          |        | 1           |                  |              |                                           |
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 |                                                                                                                                                                                                     |

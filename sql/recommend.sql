@@ -2,14 +2,18 @@
 -- would set them to, and the statements that get there.
 --
 -- Pure SQL: SELECTs over the DBA_* views (plus one optional, error-tolerant block that flushes
--- the DML counters, and two optional statements that need REPORT_COL_USAGE). Statement 3 prints
--- the column groups the table has and the CREATE_EXTENDED_STATS calls for the column sets a SQL
--- plan directive misestimated; statement 4 adds the sets SEED_COL_USAGE recorded. No DDL, no DML,
+-- the DML counters, and three optional statements that need REPORT_COL_USAGE or V$SQL_PLAN). Statement 3
+-- prints the column groups the table has and the CREATE_EXTENDED_STATS calls for the column sets a SQL
+-- plan directive misestimated; statement 4 adds the sets SEED_COL_USAGE recorded; statement 5 lists, as
+-- commented DROP_EXTENDED_STATS suggestions, the extensions (groups and expressions) REPORT_COL_USAGE does
+-- not mention; statement 6 lists, as commented CREATE_EXTENDED_STATS lines, the expressions around a column
+-- in cached plans (V$SQL_PLAN) that have no extension or function-based index yet. No DDL, no DML,
 -- nothing is gathered, no preference is changed: the statements are printed, not run.
 --
 -- Run it in the PDB that owns the table, as a user who can read the DBA_* views and call
--- DBMS_STATS. REPORT_COL_USAGE (statement 2) additionally needs SYSDBA or ANALYZE ANY DICTIONARY
--- plus ANALYZE ANY; it is skipped without. SELECT_CATALOG_ROLE + EXECUTE alone is not sufficient.
+-- DBMS_STATS. REPORT_COL_USAGE (statements 2, 4 and 5) additionally needs SYSDBA or ANALYZE ANY DICTIONARY
+-- plus ANALYZE ANY; it is skipped without. Statement 6 reads V$SQL_PLAN (SELECT_CATALOG_ROLE).
+-- SELECT_CATALOG_ROLE + EXECUTE alone is not sufficient.
 -- Input owner/table names must be conventional unquoted identifiers.
 -- See docs/oracle19c-review.md for the review and remaining model limits.
 --
@@ -412,7 +416,8 @@ WITH p AS (
          (SELECT c.last_analyzed FROM dba_tab_col_statistics c
           WHERE  c.owner = e.owner AND c.table_name = e.table_name AND c.column_name = e.extension_name) AS analyzed
   FROM   p, dba_stat_extensions e
-  WHERE  e.owner = p.own AND e.table_name = p.tab AND DBMS_LOB.SUBSTR(e.extension, 1, 1) = '('
+  WHERE  e.owner = p.own AND e.table_name = p.tab
+  AND    REGEXP_LIKE(DBMS_LOB.SUBSTR(e.extension, 4000, 1), '^\(\s*"[^"]+"(\s*,\s*"[^"]+")+\s*\)$')
 ), extset AS (
   SELECT ext.extension_name, ext.txt, ext.analyzed,
          LISTAGG(REGEXP_SUBSTR(ext.txt, '"([^"]+)"', 1, n.i, NULL, 1), ',')
@@ -489,7 +494,8 @@ WITH p AS (
 ), ext AS (
   SELECT e.extension_name, DBMS_LOB.SUBSTR(e.extension, 4000, 1) AS txt
   FROM   p, dba_stat_extensions e
-  WHERE  e.owner = p.own AND e.table_name = p.tab AND DBMS_LOB.SUBSTR(e.extension, 1, 1) = '('
+  WHERE  e.owner = p.own AND e.table_name = p.tab
+  AND    REGEXP_LIKE(DBMS_LOB.SUBSTR(e.extension, 4000, 1), '^\(\s*"[^"]+"(\s*,\s*"[^"]+")+\s*\)$')
 ), extset AS (
   SELECT ext.extension_name,
          LISTAGG(REGEXP_SUBSTR(ext.txt, '"([^"]+)"', 1, n.i, NULL, 1), ',')
@@ -535,6 +541,134 @@ SELECT 'SELECT DBMS_STATS.CREATE_EXTENDED_STATS(''' || p.own || ''', ''' || p.ta
        || '   -- SEED_COL_USAGE recorded these columns filtered together; NDV product ' || TO_CHAR(c.ndv_product) AS line
 FROM   cand c, p
 ORDER  BY c.cols;
+
+-- ====================================================================== 5. extensions REPORT_COL_USAGE does not mention (skipped on error)
+-- Suggestions only, printed as comments. A column group appears in the report as "(A, B) : FILTER" and only
+-- while SEED_COL_USAGE watched a workload (it records column groups, in SYS.COL_GROUP_USAGE$; 19c reference),
+-- so a group the report lacks is "not seen", not "never used", unless SEED_COL_USAGE ran over a representative
+-- workload. An expression extension is listed by its SYS_STU name with the ordinary column usage flags (lab
+-- EXPR_PRED), recorded since the table was created or RESET_COL_USAGE; a query parsed before the extension
+-- existed recorded nothing for it. Each unlisted extension still costs an NDV (and a histogram if SIZE AUTO
+-- decides) at every gather, and on an incremental table a new one rereads every partition (lab E4).
+WITH p AS (
+  SELECT UPPER(TRIM(BOTH '"' FROM TRIM('&adv_owner'))) AS own,
+         UPPER(TRIM(BOTH '"' FROM TRIM('&adv_table'))) AS tab
+  FROM   dual
+), n AS (
+  SELECT LEVEL AS i FROM dual CONNECT BY LEVEL <= 32
+), ext AS (
+  SELECT e.extension_name AS nm, DBMS_LOB.SUBSTR(e.extension, 4000, 1) AS txt
+  FROM   p, dba_stat_extensions e
+  WHERE  e.owner = p.own AND e.table_name = p.tab
+), exs AS (
+  -- a group lists two or more columns and nothing else; any other extension is an expression (the rule of collect.sql)
+  SELECT ext.nm, ext.txt,
+         CASE WHEN REGEXP_LIKE(ext.txt, '^\(\s*"[^"]+"(\s*,\s*"[^"]+")+\s*\)$') THEN 'group' ELSE 'expression' END AS kind,
+         (SELECT LISTAGG(REGEXP_SUBSTR(ext.txt, '"([^"]+)"', 1, n.i, NULL, 1), ',') WITHIN GROUP (ORDER BY REGEXP_SUBSTR(ext.txt, '"([^"]+)"', 1, n.i, NULL, 1))
+          FROM   n WHERE n.i <= REGEXP_COUNT(ext.txt, '"[^"]+"')) AS cols
+  FROM   ext
+), r AS (
+  SELECT p.own, p.tab, DBMS_STATS.REPORT_COL_USAGE(p.own, p.tab) AS rep FROM p
+), u AS (
+  -- "3. SYS_STUK0KH1IA6IF9E7R2BXDBW#UM : EQ RANGE NULL"
+  SELECT DBMS_LOB.SUBSTR(REGEXP_SUBSTR(r.rep, '^\s*\d+\.\s+(\S+)\s*:', 1, LEVEL, 'm', 1), 128, 1) AS col
+  FROM   r
+  CONNECT BY LEVEL <= REGEXP_COUNT(r.rep, '^\s*\d+\.\s+\S+\s*:', 1, 'm')
+), gl AS (
+  -- "6. (CITY, COUNTRY) : FILTER"
+  SELECT REGEXP_REPLACE(DBMS_LOB.SUBSTR(REGEXP_SUBSTR(r.rep, '^\s*\d+\.\s+\(([^)]*)\)\s*:', 1, LEVEL, 'm', 1), 4000, 1), '\s', '') AS txt
+  FROM   r
+  CONNECT BY LEVEL <= REGEXP_COUNT(r.rep, '^\s*\d+\.\s+\(', 1, 'm')
+), gs AS (
+  SELECT (SELECT LISTAGG(REGEXP_SUBSTR(gl.txt, '[^,]+', 1, n.i), ',') WITHIN GROUP (ORDER BY REGEXP_SUBSTR(gl.txt, '[^,]+', 1, n.i))
+          FROM   n WHERE n.i <= REGEXP_COUNT(gl.txt, '[^,]+')) AS cols
+  FROM   gl
+), unl AS (
+  SELECT x.nm, x.txt, x.kind
+  FROM   exs x
+  WHERE  (x.kind = 'group' AND NOT EXISTS (SELECT 1 FROM gs WHERE gs.cols = x.cols))
+  OR     (x.kind = 'expression' AND NOT EXISTS (SELECT 1 FROM u WHERE u.col = x.nm))
+), tb AS (
+  SELECT p.own, p.tab, (SELECT COUNT(*) FROM exs) AS n_ext, (SELECT COUNT(*) FROM unl) AS n_unl FROM p
+)
+SELECT line
+FROM  (SELECT 1 AS grp, 0 AS ord,
+              '--   extensions: ' || TO_CHAR(tb.n_ext) || CASE WHEN tb.n_ext = 0 THEN ' (none)'
+                   ELSE '; REPORT_COL_USAGE does not mention ' || TO_CHAR(tb.n_unl) || CASE WHEN tb.n_unl = 0 THEN ', so none is a drop candidate' END END AS line
+       FROM   tb
+       UNION ALL
+       SELECT 2, ROWNUM,
+              '-- EXEC DBMS_STATS.DROP_EXTENDED_STATS(''' || tb.own || ''', ''' || tb.tab || ''', ''' || REPLACE(u2.txt, '''', '''''') || ''');'
+              || CASE WHEN u2.kind = 'group'
+                      THEN '   -- column group not in the report: SEED_COL_USAGE records groups only while it watches a workload'
+                      ELSE '   -- expression ' || u2.nm || ' with no recorded predicate use' END
+       FROM   unl u2, tb
+       UNION ALL
+       SELECT 3, 0, '--   confirm first: run SEED_COL_USAGE(NULL, NULL, 900) over a representative workload and read REPORT_COL_USAGE again;'
+       FROM   tb WHERE tb.n_unl > 0
+       UNION ALL
+       SELECT 4, 0, '--   a recent RESET_COL_USAGE, or a workload that has not run since the extension was created, also leaves the report short.'
+       FROM   tb WHERE tb.n_unl > 0)
+ORDER  BY grp, ord;
+
+-- ====================================================================== 6. expression candidates (V$SQL_PLAN; skipped on error)
+-- Function calls wrapped around a column of this table in the predicates of cached plans of the table and
+-- its indexes: the statement of collect.sql (EXPRESSION_CANDIDATES), printed as commented CREATE_EXTENDED_STATS
+-- lines. Heuristic: a cached plan is weak evidence, nesting is followed one level deep, binds are skipped, a
+-- table alias is dropped, INTERNAL_FUNCTION (an implicit conversion the plan adds) is unwrapped. Left out:
+-- expressions that already have an extension or a function-based index (compared after removing blanks and
+-- double quotes). At most 20. Expression statistics help only when the expression itself is in a predicate
+-- (19c Tuning Guide, Managing Extended Statistics); each one counts against the limit of extensions.
+WITH p AS (
+  SELECT UPPER(TRIM(BOTH '"' FROM TRIM('&adv_owner'))) AS own,
+         UPPER(TRIM(BOTH '"' FROM TRIM('&adv_table'))) AS tab
+  FROM   dual
+), cols AS (
+  SELECT c.column_name
+  FROM   p JOIN dba_tab_cols c ON c.owner = p.own AND c.table_name = p.tab AND c.hidden_column = 'NO'
+), pl AS (
+  SELECT sp.access_predicates AS a, sp.filter_predicates AS f
+  FROM   v$sql_plan sp
+  WHERE  (sp.object_owner, sp.object_name) IN (SELECT p.own, p.tab FROM p
+                                               UNION ALL
+                                               SELECT i.owner, i.index_name FROM p JOIN dba_indexes i ON i.table_owner = p.own AND i.table_name = p.tab)
+), pr AS (
+  SELECT a AS t FROM pl WHERE a IS NOT NULL
+  UNION
+  SELECT f FROM pl WHERE f IS NOT NULL
+), n AS (
+  SELECT LEVEL AS i FROM dual CONNECT BY LEVEL <= 8
+), fx AS (
+  SELECT DISTINCT REGEXP_SUBSTR(pr.t, '(^|[^A-Z0-9_$#"])((UPPER|LOWER|TRUNC|SUBSTR|TO_CHAR|TO_NUMBER|TO_DATE|NVL|COALESCE|ROUND|EXTRACT|CAST|INSTR|LENGTH|LTRIM|RTRIM|TRIM|REPLACE|FLOOR|CEIL|ABS|MOD)\(([^()]|\([^()]*\))*\))', 1, n.i, 'i', 2) AS e
+  FROM   pr, n
+  WHERE  n.i <= REGEXP_COUNT(pr.t, '(^|[^A-Z0-9_$#"])((UPPER|LOWER|TRUNC|SUBSTR|TO_CHAR|TO_NUMBER|TO_DATE|NVL|COALESCE|ROUND|EXTRACT|CAST|INSTR|LENGTH|LTRIM|RTRIM|TRIM|REPLACE|FLOOR|CEIL|ABS|MOD)\(([^()]|\([^()]*\))*\))', 1, 'i')
+), cn AS (
+  SELECT DISTINCT REGEXP_REPLACE(REGEXP_REPLACE(fx.e, 'INTERNAL_FUNCTION\(([^()]*)\)', '\1'), '"[^"]+"\."', '"') AS e
+  FROM   fx
+  WHERE  fx.e IS NOT NULL AND INSTR(fx.e, ':') = 0
+), q AS (
+  SELECT DBMS_XMLGEN.GETXMLTYPE('SELECT column_expression FROM dba_ind_expressions WHERE table_owner = '''
+           || REPLACE(p.own, '''', '''''') || ''' AND table_name = ''' || REPLACE(p.tab, '''', '''''') || '''') AS x
+  FROM   p
+), have AS (
+  SELECT REPLACE(REPLACE(UPPER(DBMS_LOB.SUBSTR(e.extension, 4000, 1)), ' ', ''), '"', '') AS t
+  FROM   p JOIN dba_stat_extensions e ON e.owner = p.own AND e.table_name = p.tab
+  UNION ALL
+  SELECT REPLACE(REPLACE(UPPER(t.expr), ' ', ''), '"', '')
+  FROM   q, XMLTABLE('/ROWSET/ROW' PASSING q.x COLUMNS expr VARCHAR2(4000) PATH 'COLUMN_EXPRESSION') t
+), have1 AS (
+  SELECT CASE WHEN SUBSTR(t, 1, 1) = '(' AND SUBSTR(t, -1) = ')' THEN SUBSTR(t, 2, LENGTH(t) - 2) ELSE t END AS t FROM have
+), ok AS (
+  SELECT cn.e, ROW_NUMBER() OVER (ORDER BY cn.e) AS rn
+  FROM   cn
+  WHERE  EXISTS (SELECT 1 FROM cols WHERE INSTR(cn.e, '"' || cols.column_name || '"') > 0)
+  AND    NOT EXISTS (SELECT 1 FROM have1 WHERE have1.t = REPLACE(REPLACE(UPPER(cn.e), ' ', ''), '"', ''))
+)
+SELECT '-- SELECT DBMS_STATS.CREATE_EXTENDED_STATS(''' || p.own || ''', ''' || p.tab || ''', ''(' || REPLACE(ok.e, '''', '''''') || ')'') FROM dual;'
+       || '   -- seen in a cached plan (weak evidence); helps only if queries filter on this expression' AS line
+FROM   ok, p
+WHERE  ok.rn <= 20
+ORDER  BY ok.rn;
 
 UNDEFINE adv_owner
 UNDEFINE adv_table
