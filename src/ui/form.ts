@@ -13,6 +13,9 @@ const isPart = (i: Input) => i.partitioned;
 const isFlat = (i: Input) => !i.partitioned;
 const isCall = (i: Input) => i.runBy === "call";
 const isInc = (i: Input) => i.incremental === "TRUE";
+const isComposite = (i: Input) => i.partitioned && i.subpartitioned;
+const showHf = (i: Input) => i.hfTask === "ON" || i.runBy === "hf";
+const isExchanged = (i: Input) => i.partitioned && i.exchanged;
 
 export const LABELS: Partial<Record<keyof Input, Record<string, string>>> = {
   methodOpt: { auto: "FOR ALL COLUMNS SIZE AUTO", skewonly: "FOR ALL COLUMNS SIZE SKEWONLY", repeat: "FOR ALL COLUMNS SIZE REPEAT", pinned: "Pinned: explicit column list", size1: "FOR ALL COLUMNS SIZE 1" },
@@ -23,7 +26,9 @@ export const LABELS: Partial<Record<keyof Input, Record<string, string>>> = {
   callNoInvalidate: { none: "Not passed", AUTO_INVALIDATE: "DBMS_STATS.AUTO_INVALIDATE", FALSE: "FALSE", TRUE: "TRUE" },
   options: { GATHER: "GATHER: everything", "GATHER AUTO": "GATHER AUTO: only what is missing or stale" },
   callOptions: { none: "Not passed", GATHER: "GATHER", "GATHER AUTO": "GATHER AUTO" },
-  runBy: { call: "A GATHER_TABLE_STATS call", auto: "The automatic job (nightly, GATHER AUTO)" },
+  runBy: { call: "A GATHER_TABLE_STATS call", auto: "The automatic job (nightly, GATHER AUTO)", hf: "the high-frequency task" },
+  subpartitionType: { HASH: "HASH", LIST: "LIST", RANGE: "RANGE" },
+  hfTask: { OFF: "OFF: not running (default)", ON: "ON: runs every AUTO_TASK_INTERVAL seconds" },
   partname: { none: "Not passed", new: "The new partition", changed: "A changed, unlocked partition" },
   callGranularity: { none: "Not passed" },
   ndvAlgorithm: { "REPEAT OR HYPERLOGLOG": "REPEAT OR HYPERLOGLOG: new ones in HyperLogLog, old ones kept (default)", "ADAPTIVE SAMPLING": "ADAPTIVE SAMPLING: the 11g format for all", HYPERLOGLOG: "HYPERLOGLOG: new and stale ones in HyperLogLog" },
@@ -39,6 +44,9 @@ export const GROUPS: Group[] = [
     { key: "tableName", type: "text", label: "Table" },
     { key: "partitioned", type: "check", label: "Partitioned" },
     { key: "partitions", type: "number", label: "Partitions", min: 1, step: 1, show: isPart },
+    { key: "subpartitioned", type: "check", label: "Composite: every partition has subpartitions", show: isPart },
+    { key: "subpartitionType", type: "select", label: "Subpartition type", show: isComposite },
+    { key: "subpartitionsPerPartition", type: "number", label: "Subpartitions per partition", min: 1, step: 1, show: isComposite, hint: "blocks per partition above stay the whole partition" },
     { key: "blocksPerPartition", type: "number", label: (i) => (i.partitioned ? "Blocks per partition" : "Blocks"), min: 1, step: 1 },
     { key: "numRows", type: "number", label: "Rows (NUM_ROWS)", min: 0, step: 1, hint: "for the STALE_PERCENT threshold" },
     { key: "columnCount", type: "number", label: "Columns", min: 1, step: 1 },
@@ -65,6 +73,10 @@ export const GROUPS: Group[] = [
     { key: "stalePercent", type: "number", label: "STALE_PERCENT", min: 0, step: "any" },
     { key: "overrides", type: "select", label: "PREFERENCE_OVERRIDES_PARAMETER" },
     { key: "autoStatExtensions", type: "select", label: "AUTO_STAT_EXTENSIONS" },
+    { key: "hfTask", type: "select", label: "AUTO_TASK_STATUS (global: the high-frequency task)" },
+    { key: "hfInterval", type: "number", label: "AUTO_TASK_INTERVAL, seconds", min: 60, step: 1, show: showHf, hint: "minimum 60, default 900" },
+    { key: "hfMaxRunTime", type: "number", label: "AUTO_TASK_MAX_RUN_TIME, seconds", min: 1, max: 3600, step: 1, show: showHf, hint: "maximum and default 3600" },
+    { key: "realTimeStats", type: "check", label: "Real-time statistics are on (optimizer_real_time_statistics; Exadata and cloud only in 19c)" },
   ] },
   { id: "call", legend: "The gather", fields: [
     { key: "runBy", type: "select", label: "Run by" },
@@ -90,6 +102,11 @@ export const GROUPS: Group[] = [
     { key: "lockedChanged", type: "number", label: "Of those, with DML", min: 0, step: 1, show: (i) => isPart(i) && i.lockedPartitions > 0 },
     { key: "lockedNoSynopsis", type: "check", label: "A locked partition has no synopsis, or none for a column group (statistics copied in and locked, or a group added after the lock)", show: (i) => isPart(i) && i.lockedPartitions > 0 },
     { key: "oldFormatPartitions", type: "number", label: "Partitions whose synopsis is in the old adaptive-sampling format (11g, 12.1)", min: 0, step: 1, show: (i) => isPart(i) && i.synopses !== "none" },
+    { key: "exchanged", type: "check", label: "A partition was exchanged in since the last gather (counted among the new partitions)", show: isPart },
+    { key: "exchangeTargetGathered", type: "check", label: "The empty target partition was gathered before the exchange (partname + granularity PARTITION)", show: isExchanged },
+    { key: "exchangeStageSynopsis", type: "check", label: "The staging table had a table-level synopsis (INCREMENTAL TRUE, INCREMENTAL_LEVEL TABLE, gathered)", show: isExchanged },
+    { key: "exchangeHistogramsMatch", type: "check", label: "The histograms match on both sides (the same METHOD_OPT, or none on either side)", show: isExchanged },
+    { key: "pendingStats", type: "check", label: "Pending statistics exist for the table (DBA_TAB_PENDING_STATS has rows)" },
     { key: "tableLocked", type: "check", label: "LOCK_TABLE_STATS on the table" },
     { key: "columnChange", type: "select", label: "Column change" },
   ] },

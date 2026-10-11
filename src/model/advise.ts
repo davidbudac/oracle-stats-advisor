@@ -6,6 +6,10 @@
 // plain tables, histograms, indexes and invalidation come from the 19c SQL Tuning Guide and the
 // DBMS_STATS reference as summarised in the explainer's chapters 5, 6, 7 and 10. Each finding's
 // `basis` says which; "inferred, not observed" marks a combination the lab did not run.
+//
+// WP5 scenarios (scenarioNotes below): composite tables (lab J, DBMS_STATS granularity), a partition exchange (lab H1-H7, V3, Tg),
+// real-time statistics, the high-frequency task (runBy "hf", modelled like the nightly job), the pending-statistics workflow and
+// statistics from a bulk load (SQL Tuning Guide). The 19c quotes they rely on sit in the findings' text and basis.
 
 import { DEFAULTS, METHOD_OPT_TEXT, PREF_DEFAULTS, type Granularity, type Input, type MethodOpt, type Percent } from "./defaults";
 import { clampInput } from "./clamp";
@@ -22,12 +26,28 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
   const { input: p, notes: clampNotes } = clampInput(raw);
   const flat = !p.partitioned;
   const N = p.partitions, B = p.blocksPerPartition, T = N * B;
-  const NEW = p.newPartitions, CHG = p.changedPartitions, LCK = p.lockedPartitions, LCKCHG = p.lockedChanged, OLD = p.oldFormatPartitions;
+  const NEW0 = p.newPartitions, CHG0 = p.changedPartitions; // as the form says; the exchange below may take one away from the counts that are read
+  let NEW = NEW0, CHG = CHG0;
+  const LCK = p.lockedPartitions, LCKCHG = p.lockedChanged, OLD = p.oldFormatPartitions;
   const U = N - LCK;
   const isInc = isTrue(p.incremental), ov = isTrue(p.overrides), pubOn = isTrue(p.publish);
   const S = p.synopses;
+  // ---- a partition exchanged in since the last gather (lab H1-H7, V3, V3b, Tg). The exchanged partition is counted among the new
+  // partitions (else the changed ones). With all three conditions it arrives with statistics and a synopsis, so nothing is read for it.
+  const exchange = { on: p.exchanged && !flat, ok: false, missing: [] as string[], consumed: "none" as "none" | "new" | "changed", forced: false };
+  if (exchange.on) {
+    if (!p.exchangeTargetGathered) exchange.missing.push("target");
+    if (!p.exchangeStageSynopsis) exchange.missing.push("synopsis");
+    if (!p.exchangeHistogramsMatch) exchange.missing.push("histograms");
+    exchange.ok = isInc && exchange.missing.length === 0;
+    if (exchange.ok) {
+      if (NEW > 0) { NEW--; exchange.consumed = "new"; } else if (CHG > 0) { CHG--; exchange.consumed = "changed"; }
+    } else if (NEW + CHG === 0 && NEW + CHG + LCK < N) { NEW = 1; exchange.forced = true; } // no usable synopsis: it is read like a new partition
+  }
   const stalenessFlags = [p.useStalePercent && "USE_STALE_PERCENT", p.useLockedStats && "USE_LOCKED_STATS", p.allowMixedFormat && "ALLOW_MIXED_FORMAT"].filter(Boolean).join(",");
-  const auto = p.runBy === "auto";
+  const hf = p.runBy === "hf"; // the high-frequency task
+  const auto = p.runBy !== "call"; // the nightly job or the high-frequency task: no parameters, GATHER AUTO, the table's preferences
+  const composite = !flat && p.subpartitioned, SUB = p.subpartitionsPerPartition;
 
   const findings: Finding[] = [];
   const add = (level: Level, text: string, basis: string) => findings.push({ level, text, basis });
@@ -63,6 +83,8 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
   const blockSample = !auto && p.callBlockSample && isNum(est);
   const effective: Effective = { incremental: isInc, granularity: gran, estimatePercent: est, methodOpt: mo, cascade: cas, noInvalidate: noInv, options: opts, blockSample, ignored };
   const granFromCall = givenG && !ov, estFromCall = givenE && !ov;
+  const partGran = gran === "PARTITION" || gran === "SUBPARTITION"; // levels below the table only: the global statistics are not touched
+  const subLevel = composite && (gran === "ALL" || gran === "SUBPARTITION"); // subpartition statistics are gathered (documented values of granularity)
   if (ignored.length) {
     add("info", `The table ignores ${ignored.join(", ")} from the call and uses ${ignored.length > 1 ? "its preferences" : "its preference"}. partname and force are not preferences, so they still apply.`, "lab G2, V1.5, Ta");
   }
@@ -108,13 +130,18 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
   if (!auto && p.force) args.push("force => TRUE");
   const head = `EXEC DBMS_STATS.GATHER_TABLE_STATS(${OT}`;
   const oneLine = `${head}${args.map((a) => `, ${a}`).join("")})`;
-  const sql = auto
+  const sql = hf
+    ? `-- The high-frequency automatic task: every ${p.hfInterval} s, at most ${p.hfMaxRunTime} s per run, stale objects only, with the\n-- table's preferences. It is not a call. The nearest call you can run yourself:\nEXEC DBMS_STATS.GATHER_SCHEMA_STATS(${lit(p.owner, "OWNER")}, options => 'GATHER AUTO')`
+    : auto
     ? `-- The automatic optimizer statistics collection: GATHER_DATABASE_STATS (auto) with\n-- OPTIONS => 'GATHER AUTO' and no other parameter. The nearest call you can run yourself:\nEXEC DBMS_STATS.GATHER_SCHEMA_STATS(${lit(p.owner, "OWNER")}, options => 'GATHER AUTO')`
     : !args.length || oneLine.length <= 96 ? oneLine : `BEGIN\n  ${head.slice(5)},\n${args.map((a) => `    ${a}`).join(",\n")});\nEND;\n/`;
   // BOOLEAN arguments need PL/SQL. On 19.27 REPORT_GATHER_TABLE_STATS also takes options => (ALL_ARGUMENTS
   // lists it, a call with GATHER AUTO runs) although the 19c reference omits it, so the call is passed as is.
   const dryRun = auto
-    ? ["SET LONG 1000000 LONGCHUNKSIZE 1000000", "SELECT DBMS_STATS.REPORT_GATHER_AUTO_STATS(detail_level => 'TYPICAL', format => 'TEXT') FROM dual;"].join("\n")
+    ? [
+      ...(hf ? ["-- REPORT_GATHER_AUTO_STATS is the nearest dry run (it reports the nightly job); the task's own runs are in DBA_AUTO_STAT_EXECUTIONS"] : []),
+      "SET LONG 1000000 LONGCHUNKSIZE 1000000", "SELECT DBMS_STATS.REPORT_GATHER_AUTO_STATS(detail_level => 'TYPICAL', format => 'TEXT') FROM dual;",
+    ].join("\n")
     : [
       ...(givenO ? ["-- options => is accepted by REPORT_GATHER_TABLE_STATS on 19.27 although the 19c reference omits it; drop it if your release update rejects it."] : []),
       "SET LONG 1000000 LONGCHUNKSIZE 1000000",
@@ -127,7 +154,11 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
     ].join("\n");
 
   let partname = auto ? "none" : p.partname;
-  if (partname === "new" && NEW < 1) { add("warn", "partname names the new partition, but there are no new partitions here. The advisor models the call without it.", "input"); partname = "none"; }
+  if (partname === "new" && NEW < 1) {
+    if (exchange.consumed === "new") add("info", "partname names the partition that was exchanged in. It arrived with statistics and a synopsis (see the exchange finding), so there is nothing to read for it.", "lab H5, V3");
+    else add("warn", "partname names the new partition, but there are no new partitions here. The advisor models the call without it.", "input");
+    partname = "none";
+  }
   if (partname === "changed" && CHG < 1) { add("warn", "partname names a changed partition, but there are none here. The advisor models the call without it.", "input"); partname = "none"; }
   const named = partname !== "none";
 
@@ -138,7 +169,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
   const blocksNow = () => Math.ceil(units() * B * sampleFactor);
 
   // table-level staleness, as the automatic job and GATHER AUTO see it
-  const tableChange = flat || p.useTableChangePercent ? p.tableChangePercent : (NEW * 100 + CHG * p.changePercent + LCKCHG * p.changePercent) / N;
+  const tableChange = flat || p.useTableChangePercent ? p.tableChangePercent : (NEW0 * 100 + CHG0 * p.changePercent + LCKCHG * p.changePercent) / N;
   const tableStale = tableChange > p.stalePercent;
   const noStats = p.tableStats === "none";
   const autoPlan: AutoPlan = {
@@ -245,7 +276,127 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
     }
   };
 
+  // ---- the scenarios the form models beyond the plain gather: a composite table, an exchange, real-time statistics, the
+  // high-frequency task, pending statistics and statistics from a bulk load. Findings and fixes only; the read model above is unchanged,
+  // except that an exchange which arrives with a synopsis takes its partition out of the counts (see `exchange`).
+  const scenarioNotes = () => {
+    const partsRead = read.newParts + read.changedParts + read.otherParts;
+    const tuning = "19c SQL Tuning Guide";
+    const plainName = (v: string, ph: string) => v || ph;
+
+    // -- composite (subpartitioned) tables
+    if (composite && gathered && !o.error) {
+      const type = p.subpartitionType;
+      const segs = partsRead * SUB;
+      const refGran = "19c DBMS_STATS reference, GATHER_TABLE_STATS granularity";
+      if (!subLevel) {
+        add("info", `Composite table (RANGE-${type}, ${plural(SUB, "subpartition")} per partition). GRANULARITY ${gran} gathers ${gran === "GLOBAL" ? "the table level only" : partGran ? "the partition level only" : "the table and partition level"}, no subpartition statistics${isInc ? ", and with INCREMENTAL the synopses are kept per partition" : ""}. DML in one subpartition makes the whole parent partition stale, so all ${fmt(SUB)} of its subpartitions are read: the blocks above are whole partitions, ${partsRead ? `${plural(partsRead, "partition")} read` : "none read now"}.`, type === "HASH" ? "lab J (500 rows into one hash subpartition: the whole partition re-read, 1 PART SYN); STATS_LAB.C1 has no subpartition statistics under AUTO; 19c DBMS_STATS reference ('GLOBAL AND PARTITION': no subpartition level statistics are gathered even if it is a composite partitioned object)" : "lab J for HASH subpartitions; inferred for LIST and RANGE");
+        if (gran === "AUTO" && type !== "HASH") add("warn", `The reference says only that AUTO "Determines the granularity based on the partitioning type", and the Tuning Guide that AUTO gathers "subpartition, partition, or global statistics, depending on partition type". The lab ran HASH subpartitions only (lab J). For ${type} subpartitions the advisor assumes the same as for HASH, but this is inferred: after a gather, check whether DBA_TAB_SUBPARTITIONS.LAST_ANALYZED is set. If it is, the subpartitions are gathered too and the notes for GRANULARITY ALL below apply.`, "19c DBMS_STATS reference (granularity AUTO); 19c Tuning Guide, Guideline for Partitioned Objects; inferred for LIST and RANGE");
+      } else {
+        add("info", `Composite table (RANGE-${type}, ${plural(SUB, "subpartition")} per partition). GRANULARITY ${gran} also gathers subpartition statistics ("${gran === "ALL" ? "Gathers all (subpartition, partition, and global) statistics" : "Gathers subpartition-level statistics"}"): the ${plural(partsRead, "partition")} read ${partsRead === 1 ? "is" : "are"} ${fmt(segs)} subpartition gathers, one task each in DBA_OPTSTAT_OPERATION_TASKS, in the same blocks.${gran === "SUBPARTITION" ? " SUBPARTITION gathers that level only, so the partition and table statistics stay as they were (inferred, like PARTITION in lab A3)." : ""}`, `${refGran}; inferred for the task count`);
+        if (isInc) add("info", `With INCREMENTAL the guide says: "If a table uses composite partitioning, then the database only gathers statistics for modified subpartitions. The database does not gather statistics at the subpartition level for unmodified subpartitions." So a changed partition costs only its modified subpartitions, up to ${fmt(SUB)} times fewer blocks than shown; a new partition is read in full. The page keeps partition units and shows the upper bound. The synopses stay at partition level (inferred; lab J ran AUTO only).`, `${tuning}, Considerations for Incremental Statistics Maintenance; inferred for the synopsis level`);
+        else add("info", "Without INCREMENTAL nothing is kept between gathers: every subpartition of every partition is read, and the table level needs its own pass. The extra level adds tasks, not blocks, in this model.", "inferred, not observed");
+      }
+      add("info", "partname with a subpartition name is out of scope: the reference describes partname as \"Name of the partition\", and the page models partition names only. To gather one subpartition, call GATHER_TABLE_STATS with the subpartition name yourself and check the result in DBA_TAB_SUBPARTITIONS.", "19c DBMS_STATS reference, GATHER_TABLE_STATS partname; not modelled");
+    }
+
+    // -- a partition exchanged in
+    if (exchange.on && gathered && !o.error) {
+      const oldWayNow = isNum(est) || !pubOn || p.incrementalLevel === "TABLE";
+      const docBasis = `${tuning}, Maintaining Incremental Statistics for Partition Maintenance Operations`;
+      const tgt = lit(p.newPartitionName, "NEW_PARTITION");
+      if (!isInc) {
+        add("info", `A partition was exchanged in, but INCREMENTAL is FALSE: there are no synopses to carry over, so the exchange simply makes the partition new or changed like any loaded one${exchange.forced ? " (counted as one new partition)" : ""}. The gather reads it${gran === "GLOBAL" || partGran ? "" : " and then the whole table for the global statistics"}. Preparing a staging table pays off only on an incremental table.`, `${docBasis}; lab X2`);
+      } else if (exchange.ok && S === "all" && !oldWayNow) {
+        add("good", `The exchanged partition is not read: the empty target partition was gathered before the exchange, the staging table carried a table-level synopsis (INCREMENTAL TRUE, INCREMENTAL_LEVEL TABLE) and the histograms match on both sides. After the exchange the partition has statistics and a synopsis, so ${auto ? "the job" : "the gather"} reads nothing for it${o.global === "merged" ? " and merges them into the global statistics" : ""}.`, `lab H5, V3, V3b, Tg; ${docBasis}: "After the exchange, the partitioned table has both statistics and a synopsis for partition p_sales_01_2010."`);
+        if (exchange.consumed === "none") add("info", "No new or changed partition is counted besides the exchanged one, so the gather reads nothing.", "lab H5");
+      } else if (exchange.ok) {
+        add("info", `The exchange was prepared correctly, but ${S !== "all" ? "the table has no complete set of synopses yet, so the gather reads every unlocked partition to build them" : "the gather runs the old way (see the findings above)"}: the preparation saves nothing until that is fixed.`, "lab H5, N1, A8");
+      } else {
+        const why = [
+          exchange.missing.includes("target") && "the empty target partition was not gathered before the exchange (lab H1, H2, H3)",
+          exchange.missing.includes("synopsis") && "the staging table had no table-level synopsis: it needs INCREMENTAL TRUE and INCREMENTAL_LEVEL TABLE and a gather (lab H3, H4, H7)",
+          exchange.missing.includes("histograms") && "the histograms differ between the two sides: the stage was gathered with a different METHOD_OPT (lab H6)",
+        ].filter(Boolean);
+        add("warn", `The exchanged partition is read again${exchange.forced ? " (counted as one new partition)" : ""}: ${why.join("; ")}. Three things must hold together: the empty target partition was gathered before the exchange, the staging table carried a table-level synopsis, and the histograms match on both sides (the same METHOD_OPT, or none on either side, lab Tg). With all three the gather read nothing and updated the global statistics (lab H5, V3). The Oracle optimizer blog says the same: "The new partition must have a synopsis before the exchange".`, `lab H1-H7, V3, V3b, Tg; ${docBasis}; Oracle optimizer blog (Bayliss, part 2)`);
+        setVerdict("warn", "The exchanged partition is read again");
+        const other = (name: string) => `EXEC DBMS_STATS.SET_TABLE_PREFS(${lit(p.owner, "OWNER")}, 'STAGING_TABLE', '${name}'`;
+        const mtext = METHOD_OPT_TEXT[p.methodOpt];
+        fixAt(2, "-- Exchange recipe (lab V3, V3b): make the staging table and the target agree before the exchange");
+        fixAt(2, `${sp("METHOD_OPT", mtext)}  -- the partitioned table: an explicit METHOD_OPT, the same text on both tables`);
+        fixAt(2, `${other("METHOD_OPT")}, '${mtext}')`);
+        fixAt(2, `${other("INCREMENTAL")}, 'TRUE')`);
+        fixAt(2, `${other("INCREMENTAL_LEVEL")}, 'TABLE')`);
+        fixAt(2, `EXEC DBMS_STATS.GATHER_TABLE_STATS(${OT}, partname => ${tgt}, granularity => 'PARTITION')  -- the still empty target partition`);
+        fixAt(2, `EXEC DBMS_STATS.GATHER_TABLE_STATS(${lit(p.owner, "OWNER")}, 'STAGING_TABLE')  -- builds the table-level synopsis`);
+        fixAt(2, `ALTER TABLE ${plainName(p.owner, "OWNER")}.${plainName(p.tableName, "TABLE")} EXCHANGE PARTITION ${plainName(p.newPartitionName, "NEW_PARTITION")} WITH TABLE STAGING_TABLE`);
+        fixAt(2, `EXEC DBMS_STATS.GATHER_TABLE_STATS(${OT})  -- reads nothing for the exchanged partition, merges the global statistics`);
+      }
+    }
+
+    // -- real-time statistics
+    if (p.realTimeStats) {
+      const rt = `${tuning}, Real-Time Statistics`;
+      add("info", `Real-time statistics are on (OPTIMIZER_REAL_TIME_STATISTICS = TRUE): while conventional DML runs, Oracle extends the table's statistics in the dictionary (row and block counts, and the low and high values of the columns), marked STATS_ON_CONVENTIONAL_DML in NOTES. They "augment rather than replace traditional statistics. For this reason, you must continue to gather statistics regularly using DBMS_STATS, preferably using the AutoTask job." This gather reads exactly what is shown above. It adds no NDV, histogram, index statistics or synopsis, and the next gather writes ordinary statistics over the real-time values (inferred from the documentation's example, not observed). STALE_STATS and the automatic job still go by DBA_TAB_MODIFICATIONS (inferred).${flat ? "" : ' The documentation notes that "partition-level statistics are not supported, so the only table-level views show real-time statistics": the partition rows and the synopses of an incremental table are not touched.'}`, `${rt}; inferred for what they omit and for the interplay with a gather`);
+      add("warn", "In 19c the feature is licensed for Exadata and the Exadata cloud services only. The Licensing Information User Manual, Table 1-8 Performance, lists \"Real-Time Statistics\" as N for SE2, EE and all Base Database editions and Y for EE-ES and ExaDB, with the note \"EE-ES: Available on Exadata. Not available on Oracle Database Appliance.\" The parameter exists elsewhere (lab, 19.27 on a non-Exadata VM: optimizer_real_time_statistics default FALSE); do not set it without the license.", "19c Licensing Information User Manual, Table 1-8 Performance; lab");
+    }
+
+    // -- the high-frequency automatic task
+    if (hf || p.hfTask === "ON") {
+      const hfDoc = `${tuning}, Configuring High-Frequency Automatic Optimizer Statistics Collection`;
+      const runs = Math.floor(86400 / p.hfInterval);
+      if (hf) {
+        if (p.hfTask === "OFF") {
+          add("warn", "AUTO_TASK_STATUS is OFF, which is the default: the high-frequency task is not running, so none of this happens until a DBA turns it on with DBMS_STATS.SET_GLOBAL_PREFS. The page models the task as if it were on.", `${hfDoc}: "OFF — Disables high-frequency automatic optimizer statistics collection. This is the default."; lab (19.27: AUTO_TASK_STATUS OFF, AUTO_TASK_INTERVAL 900, AUTO_TASK_MAX_RUN_TIME 3600)`);
+          setVerdict("warn", "The high-frequency task is switched off");
+          fixAt(8, "EXEC DBMS_STATS.SET_GLOBAL_PREFS('AUTO_TASK_STATUS', 'ON')");
+          fixAt(8, `EXEC DBMS_STATS.SET_GLOBAL_PREFS('AUTO_TASK_INTERVAL', '${p.hfInterval}')`);
+          fixAt(8, `EXEC DBMS_STATS.SET_GLOBAL_PREFS('AUTO_TASK_MAX_RUN_TIME', '${p.hfMaxRunTime}')`);
+        }
+        add("info", `The high-frequency task runs every ${fmt(p.hfInterval)} seconds (${fmt(runs)} runs a day; the minimum is 60) and each run lasts at most ${fmt(p.hfMaxRunTime)} seconds (the maximum is 3600). It is "lightweight" and "only gathers stale statistics", and does not purge statistics of objects that no longer exist or invoke the Optimizer Statistics Advisor. "The high-frequency task may execute in maintenance windows, but it will not execute while the maintenance window auto stats gathering job is executing." If the stale objects need longer than the maximum run time, the rest waits for the next run (inferred). A table still being loaded is gathered again in every run in which it is stale; the page shows one run. Monitor the runs in DBA_AUTO_STAT_EXECUTIONS.`, `${hfDoc}, How High-Frequency Automatic Optimizer Statistics Collection Works; inferred for the overrun and the repeated gathers`);
+        add("info", "The page models a run like the nightly job: staleness by STALE_PERCENT, GATHER AUTO semantics, and the global statistics left behind when the table as a whole is below STALE_PERCENT. Both tasks share the global preferences (AUTOSTATS_TARGET, which applies to automatic collection only) and the table's own preferences. The documentation says only that the task gathers stale statistics: the equivalence is inferred and the task itself was not run in the lab.", "inferred, not observed; lab G6-G9, Ti (schema GATHER AUTO, not the task); 19c DBMS_STATS reference, AUTOSTATS_TARGET");
+      } else {
+        add("info", `The high-frequency task is switched on (every ${fmt(p.hfInterval)} s, at most ${fmt(p.hfMaxRunTime)} s per run). It can gather this table between ${auto ? "two nightly runs" : "your calls"} as soon as the table is stale, so the changes this page counts may already be gathered when you look; a plain call that finds nothing stale reads nothing. The two tasks share AUTOSTATS_TARGET and the table's preferences.`, "inferred, not observed; " + hfDoc);
+      }
+      add("warn", "In 19c the task is licensed for Exadata and the Exadata cloud services only. The Licensing Information User Manual, Table 1-8 Performance, lists \"High-Frequency Automatic Optimizer Statistics Collection\" as N for SE2, EE and all Base Database editions and Y for EE-ES and ExaDB, with the note \"EE-ES: Available on Exadata. Not available on Oracle Database Appliance.\" The preferences exist on other systems (lab, 19.27 on a non-Exadata VM); do not switch the task on without the license.", "19c Licensing Information User Manual, Table 1-8 Performance; lab");
+    }
+
+    // -- pending statistics: the test-and-publish workflow
+    if ((!pubOn && gathered) || p.pendingStats) {
+      const pend = "19c DBMS_STATS reference, Pending Statistics";
+      fixAt(3, "-- Test the pending statistics, then publish or discard them:");
+      fixAt(3, "ALTER SESSION SET OPTIMIZER_USE_PENDING_STATISTICS = TRUE;  -- this session only; run the workload or EXPLAIN PLAN");
+      fixAt(3, `SELECT * FROM TABLE(DBMS_STATS.DIFF_TABLE_STATS_IN_PENDING(${OT}, NULL, 10));  -- what differs from the published statistics by more than 10 percent`);
+      fixAt(3, `EXEC DBMS_STATS.PUBLISH_PENDING_STATS(${OT})  -- if the plans are good`);
+      fixAt(3, `EXEC DBMS_STATS.DELETE_PENDING_STATS(${OT})  -- if they are not`);
+      if (!flat && isInc) fixAt(3, "-- under INCREMENTAL prefer DELETE_PENDING_STATS and a gather with PUBLISH TRUE: published pending statistics leave the global NOTES blank and the next gather rereads every partition (lab Tf)");
+      if (!pubOn) fixAt(3, "-- PUBLISH_PENDING_STATS does not change the PUBLISH preference: set it back to TRUE when the test is over");
+      if (!pubOn && gathered) add("info", `The pending-statistics workflow: ALTER SESSION SET OPTIMIZER_USE_PENDING_STATISTICS = TRUE in a test session to run queries against the pending values, DIFF_TABLE_STATS_IN_PENDING to compare them with the published ones, then PUBLISH_PENDING_STATS or DELETE_PENDING_STATS (see the fixes). "The statistics stored in private area are not used by Cost Based Optimizer unless parameter optimizer_use_pending_statistics is set to TRUE."`, `${pend}; lab G1`);
+      if (p.pendingStats && pubOn) {
+        add("warn", `Pending statistics exist for the table (DBA_TAB_PENDING_STATS) and PUBLISH is TRUE now, so they linger: only sessions with OPTIMIZER_USE_PENDING_STATISTICS = TRUE see them.${!flat && isInc ? " Under INCREMENTAL they were gathered without synopses (lab G1): publishing them leaves the global NOTES blank and the next gather reads every partition again (lab Tf), while deleting them first lets the next gather read only what changed (lab G1c)." : ""} Delete them before the next gather unless you mean to publish them.`, `${pend}; lab G1, G1c, Tf`);
+        setVerdict("warn", "Pending statistics left behind");
+      } else if (p.pendingStats) {
+        add("info", "Pending statistics already exist; with PUBLISH FALSE this gather writes pending statistics again, and the published ones do not change (lab G1b).", `${pend}; lab G1b`);
+      }
+    }
+
+    // -- statistics from a direct-path load (online statistics gathering for bulk loads)
+    if (p.tableStats === "load") {
+      const bulk = `${tuning}, Online Statistics Gathering for Bulk Loads`;
+      add("info", `The statistics today come from online statistics gathering during a bulk load (NOTES = STATS_ON_LOAD). "The database can gather table statistics automatically during the following types of bulk loads: INSERT INTO ... SELECT using a direct path insert, and CREATE TABLE AS SELECT." A parallel insert is direct-path by default; the /*+APPEND*/ hint forces it. The load gathers statistics only when the target is empty ("Bulk loads only gather online statistics automatically when the object is empty", where the object is the table, partition or subpartition), and not when the table "has a PUBLISH preference set to FALSE", "Its statistics are locked" or "It is loaded using a multitable INSERT statement". It builds no histograms ("After gathering online statistics, the database does not automatically create histograms"); the explainer saw no index statistics either, which the guide does not mention.`, `${bulk}, Restrictions; Histogram Creation After Bulk Loads; explainer chapter 7 for the indexes`);
+      if (p.tableLocked) add("warn", "The statistics are locked, and a bulk load into a table with locked statistics gathers no online statistics (a documented restriction): any STATS_ON_LOAD values were written before the lock. Every gather now raises ORA-20005 unless it passes force => TRUE (lab D1, D3); with force the lock stays.", `${bulk}, Restrictions; lab D1, D3`);
+      if (!pubOn) add("warn", "PUBLISH is FALSE, and a bulk load gathers no online statistics when it is (a documented restriction): loads made while it is FALSE leave the table without statistics, which the automatic job then gathers into the pending area.", `${bulk}, Restrictions`);
+      if (!flat) add("info", `On a partitioned table: "When inserting rows into a partitioned table, the database gathers global statistics during the insert … However, the database does not gather partition-level statistics." With partition-extended syntax (INSERT /*+APPEND*/ INTO t PARTITION (p) SELECT …) "the database gathers statistics on the partition during the insert. However, the database does not gather global statistics", and with INCREMENTAL "also gathers a synopsis" for that partition. A new partition loaded that way already has statistics and a synopsis; the New partitions count of this form is the partitions without them, so lower it for such partitions. Not modelled.`, `${bulk}, Global Statistics During Inserts into Partitioned Tables; inferred for the read count`);
+      if (opts !== "GATHER AUTO") {
+        add("info", "A plain gather (OPTIONS GATHER) reads the table again and replaces the load's statistics. \"The preceding PL/SQL program only gathers missing or stale statistics. The database does not gather table and basic column statistics collected during the bulk load\": with options => 'GATHER AUTO' only the missing histograms and index statistics are gathered. The guide also suggests setting the table preference OPTIONS to GATHER AUTO on tables you plan to bulk load.", `${bulk}, Histogram Creation After Bulk Loads`);
+        fixAt(o.error ? 9 : 4, `EXEC DBMS_STATS.GATHER_TABLE_STATS(${OT}, options => 'GATHER AUTO')`);
+        fixAt(o.error ? 9 : 4, sp("OPTIONS", "GATHER AUTO"));
+      }
+    }
+  };
+
   const finish = (): Outcome => {
+    scenarioNotes();
     o.blocks = blocksNow();
     o.partitionsRead = read.newParts + read.changedParts + read.otherParts;
     o.verdict = verdict ?? ["good", ""];
@@ -269,6 +420,8 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
       const ni: Partial<Input> = {
         ...p, runBy: p.runBy, partname: "none", callGranularity: "none", callEstimatePercent: "none", callMethodOpt: "none", callCascade: "none", callNoInvalidate: "none", callOptions: "none",
         callBlockSample: false, force: false, columnChange: "none",
+        exchanged: false, // consumed by this gather
+        pendingStats: p.pendingStats || (gathered && !pubOn),
         newPartitions: left.newParts + left.lack, changedPartitions: left.changedParts, lockedNoSynopsis: o.lockedNoSynopsisAfter,
         // old-format synopses are rewritten only when Oracle must not merge formats; under ALLOW_MIXED_FORMAT they stay
         oldFormatPartitions: published && !p.allowMixedFormat && p.ndvAlgorithm !== "ADAPTIVE SAMPLING" ? Math.max(0, OLD - Math.min(OLD, o.partitionsRead)) : OLD,
@@ -352,7 +505,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
     };
     // indexes
     const partsRead = read.newParts + read.changedParts + read.otherParts;
-    const partOnly = gran === "PARTITION";
+    const partOnly = partGran;
     let fullScans = 0, partitionScans = 0, itext: string;
     if (!gathered || cas === "FALSE") {
       itext = cas === "FALSE" ? "CASCADE is FALSE: no index is read. Index statistics stay as they are." : "No index work: the gather did not run.";
@@ -362,7 +515,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
       const local = flat ? 0 : Math.min(p.localIndexCount, p.indexCount), global = p.indexCount - local;
       if (!flat && partOnly) {
         partitionScans = local * partsRead; fullScans = global;
-        itext = `GRANULARITY PARTITION: the ${plural(local, "local index")} ${local === 1 ? "gets" : "get"} statistics for the ${plural(partsRead, "index partition")} of the partitions read; the index-level statistics are left alone. ${global ? `The ${plural(global, "global index")} ${global === 1 ? "has" : "have"} no partitions to scope to, so ${global === 1 ? "it is" : "they are"} scanned in full.` : ""}`.trim();
+        itext = `GRANULARITY ${gran}: the ${plural(local, "local index")} ${local === 1 ? "gets" : "get"} statistics for the ${plural(partsRead, "index partition")} of the partitions read; the index-level statistics are left alone. ${global ? `The ${plural(global, "global index")} ${global === 1 ? "has" : "have"} no partitions to scope to, so ${global === 1 ? "it is" : "they are"} scanned in full.` : ""}`.trim();
       } else {
         partitionScans = local * partsRead; fullScans = p.indexCount;
         itext = flat
@@ -463,7 +616,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
       if (p.incrementalLevel === "TABLE") fixAt(2, sp("INCREMENTAL_LEVEL", "PARTITION"));
     }
     if (refreshGlobal) {
-      if (conditionsHold && gran !== "PARTITION") {
+      if (conditionsHold && !partGran) {
         if (S !== "all") readUnlocked();
         const synOk = !(LCKCHG > 0 && !p.useLockedStats) && !p.lockedNoSynopsis && !(LCK > 0 && S !== "all");
         if (synOk) {
@@ -477,10 +630,10 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
           setVerdict("bad", "Full scan for the global statistics");
           add("bad", S !== "all" ? "The synopses are missing or out of step, so the job has to read every unlocked partition and, since the locked ones cannot get a synopsis, scan the whole table for the global statistics." : "A locked partition with DML or without a synopsis cannot be merged, so the global statistics come from a scan of the whole table.", "lab C1, V2, Tc; inferred for the job");
         }
-      } else if (gran === "PARTITION") {
+      } else if (partGran) {
         o.global = "untouched"; o.globalNotes = null;
-        setVerdict("warn", "GRANULARITY PARTITION: global statistics never refreshed");
-        add("warn", "The GRANULARITY preference is PARTITION, so even a stale table gets only partition statistics from the job; the global row count and high values never move.", "lab G2b; inferred for the job");
+        setVerdict("warn", `GRANULARITY ${gran}: global statistics never refreshed`);
+        add("warn", `The GRANULARITY preference is ${gran}, so even a stale table gets only ${gran === "SUBPARTITION" ? "subpartition" : "partition"} statistics from the job; the global row count and high values never move.`, "lab G2b; inferred for the job");
         fixAt(5, sp("GRANULARITY", "AUTO"));
       } else {
         readAllPartitions(); read.globalScan = N; o.global = !pubOn ? "pending" : isNum(est) ? "sample" : "fullscan"; o.globalNotes = o.global === "pending" ? null : p.incrementalLevel === "TABLE" ? "HYPERLOGLOG" : "";
@@ -528,7 +681,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
         basicKept = true;
         read.extraPass = 0;
         setVerdict("good", "Fills the gaps: histograms and index statistics only");
-        add("good", "The load left table and basic column statistics (NOTES = STATS_ON_LOAD) but no histograms and no index statistics. GATHER AUTO keeps the basic statistics and adds only what is missing: a histogram sample for the candidate columns, and the indexes.", "19c Tuning Guide; explainer chapter 7, observed on 19.27");
+        add("good", "The load left table and basic column statistics (NOTES = STATS_ON_LOAD) but no histograms and no index statistics. GATHER AUTO keeps the basic statistics and adds only what is missing: a histogram sample for the candidate columns, and the indexes.", "19c SQL Tuning Guide, Online Statistics Gathering for Bulk Loads, Histogram Creation After Bulk Loads (\"The database does not gather table and basic column statistics collected during the bulk load\"); the missing index statistics: explainer chapter 7, observed on 19.27");
         add("info", "Under GATHER AUTO the frequency histograms are built from a sample rather than from a full scan.", "19c DBMS_STATS reference");
         return finish();
       }
@@ -588,14 +741,14 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
     else add("info", "options => 'GATHER AUTO' gathers level by level what is missing or stale. On a table without INCREMENTAL the lab saw a stale partition gathered and the global statistics left alone; modelled here as the plain call, which is the upper bound.", "lab Ti; inferred for GATHER_TABLE_STATS");
   }
 
-  const partOnly = gran === "PARTITION";
+  const partOnly = partGran;
   if (!isInc && named && gran === "APPROX_GLOBAL AND PARTITION") add("warn", "APPROX_GLOBAL AND PARTITION can aggregate global statistics without scanning the table, excluding column NDV and index distinct keys, when all partition statistics are available. That aggregation path is not modelled: the displayed full scan is an upper bound.", "19c DBMS_STATS reference");
   // the old way: what a gather does when it cannot work incrementally
   const oldWay = (inferredNamed: boolean) => {
     if (gran !== "GLOBAL") { if (named) readNamed(); else readUnlocked(); }
     if (!partOnly) read.globalScan = N;
     if (named && inferredNamed) add("info", "The call names a partition. Gathered the old way, that reads the partition and then the whole table, as it does without INCREMENTAL (X2). With the setting that forces the old way here, this combination was not observed.", "lab X2; inferred, not observed");
-    if (partOnly) add("info", "GRANULARITY PARTITION never scans the whole table, so only the partition level is gathered. This combination, without incremental statistics, was not observed.", "19c DBMS_STATS reference; inferred, not observed");
+    if (partOnly) add("info", `GRANULARITY ${gran} never scans the whole table, so only the ${gran === "SUBPARTITION" ? "subpartition" : "partition"} level is gathered. This combination, without incremental statistics, was not observed.`, "19c DBMS_STATS reference; inferred, not observed");
   };
 
   // ---- step 2: INCREMENTAL = FALSE
@@ -615,7 +768,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
     if (!pubOn) { o.global = partOnly ? "untouched" : "pending"; add("warn", "PUBLISH is FALSE: all of it goes to the pending area; the published statistics do not change.", "lab G1"); fixAt(3, sp("PUBLISH", "TRUE")); }
     fixAt(1, sp("INCREMENTAL", "TRUE"));
     fixAt(1, "-- the first incremental gather then reads every partition once to build the synopses");
-    if (partOnly) { if (granFromCall) hurtCall = true; if (p.granularity === "PARTITION") fixAt(5, sp("GRANULARITY", "AUTO")); }
+    if (partOnly) { if (granFromCall) hurtCall = true; if (p.granularity === "PARTITION" || p.granularity === "SUBPARTITION") fixAt(5, sp("GRANULARITY", "AUTO")); }
     if (!verdict) setVerdict("warn", "Not incremental");
     return finish();
   }
@@ -637,7 +790,6 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
       add("bad", "PUBLISH is FALSE. Pending statistics are gathered without synopses: every partition, then the whole table. The result waits in DBA_TAB_PENDING_STATS and the published statistics do not change.", "lab G1, G1b");
       add("bad", "Publishing the pending statistics leaves the synopses out of step: the next gather rereads every partition. Deleting them instead lets the next gather read only what changed.", "lab G1c, Tf");
       fixAt(3, sp("PUBLISH", "TRUE"));
-      fixAt(3, `-- Optional, after reviewing the pending statistics: EXEC DBMS_STATS.DELETE_PENDING_STATS(${OT})`);
     }
     if (causes.includes("level")) {
       add("bad", "INCREMENTAL_LEVEL TABLE keeps one synopsis for the whole table, which is what a staging table needs before an exchange. On a partitioned table it replaces the partition synopses, and every gather reads every partition and then the whole table.", "lab N2, X4");
@@ -699,7 +851,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
   if (S === "none") add("info", `No synopses exist yet. The first incremental gather reads ${named && partOnly ? "the named partition" : "every unlocked partition"} once to build them.`, "lab T1, N1");
   if (S === "stale") add("info", "The synopses no longer match the statistics, so each partition is read again to rebuild its synopsis.", "lab A8b, L1");
   if (S === "none" && named && !partOnly) add("warn", "The call names a partition, but the table has no synopses yet and GRANULARITY is not PARTITION, so every unlocked partition is read.", "lab N1");
-  if (S === "none" && partOnly && !named) add("info", "GRANULARITY PARTITION without partname still reads every unlocked partition to build its synopsis.", "inferred, not observed; lab A10 saw only the new partition read, on a table that had synopses");
+  if (S === "none" && partOnly && !named) add("info", `GRANULARITY ${gran} without partname still reads every unlocked partition to build its synopsis.`, "inferred, not observed; lab A10 saw only the new partition read, on a table that had synopses");
   if (synopsisBuildOnly) {
     add("good", "The call builds synopses one partition at a time, which is how to start a very large table. Finish with one plain call, and set PREFERENCE_OVERRIDES_PARAMETER only after the build: it turns PARTITION into AUTO.", "lab V1.2, V1.3, example 5");
     add("info", `The plain call afterwards reads the partitions that still have no synopsis (${fmt(left.lack)} now), then merges. The advisor cannot know how many calls you have already made.`, "lab V1.3, V5");
@@ -778,7 +930,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
       setVerdict("warn", "Global statistics left behind");
       add("warn", "The call asks for the partition level only. The partitions get statistics and synopses, but the global row count and the partition key's high value still end before the new data. A plain call afterwards merges the synopses and reads nothing.", "lab A3, A3b, A10, G2b");
       if (granFromCall) hurtCall = true;
-      if (p.granularity === "PARTITION") fixAt(5, sp("GRANULARITY", "AUTO"));
+      if (p.granularity === "PARTITION" || p.granularity === "SUBPARTITION") fixAt(5, sp("GRANULARITY", "AUTO"));
     }
   } else if (fullScanForced) {
     o.global = "fullscan"; o.globalNotes = "";
@@ -816,7 +968,7 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
 
 /** Build the ordered step list and the verification queries for an outcome (pure; called by the page). */
 export function stepsOf(o: Outcome): Step[] {
-  const p = o.input, flat = !p.partitioned, auto = p.runBy === "auto";
+  const p = o.input, flat = !p.partitioned, auto = p.runBy !== "call", hf = p.runBy === "hf";
   const N = p.partitions, B = p.blocksPerPartition;
   const r = o.read;
   const steps: Step[] = [];
@@ -826,7 +978,7 @@ export function stepsOf(o: Outcome): Step[] {
   steps.push({
     id: "resolve", title: "Resolve the settings", status: "does",
     text: auto
-      ? "The automatic job passes no parameters: every setting is the table's preference, else the global one. GATHER AUTO means only what is missing or stale."
+      ? `${hf ? "The high-frequency task" : "The automatic job"} passes no parameters: every setting is the table's preference, else the global one. GATHER AUTO means only what is missing or stale.`
       : `${fromCall.length ? `From the call: ${fromCall.join(", ")}. ` : ""}${ign.length ? `Passed but ignored (PREFERENCE_OVERRIDES_PARAMETER): ${ign.join(", ")}. ` : ""}${fromPref.length ? `From table or global preferences that differ from Oracle's defaults: ${fromPref.join(", ")}. ` : ""}Everything else is the documented default.`,
     basis: "19c DBMS_STATS reference; explainer chapter 6",
   });
@@ -849,6 +1001,10 @@ export function stepsOf(o: Outcome): Step[] {
     if (r.extraPass) parts.push(`one more pass over ${plural(r.extraPass, "partition")} for the histograms`);
     if (r.globalScan) parts.push(`then the whole table (${fmt(N)} partitions) for the global statistics`);
     readText = `${parts.join(", ")}: ${fmt(o.blocks)} blocks, counted as whole partitions of ${fmt(B)}. ${o.scan.text}`;
+  }
+  if (!flat && p.subpartitioned && units > 0) {
+    const g = o.effective.granularity, per = p.subpartitionsPerPartition, sublvl = g === "ALL" || g === "SUBPARTITION";
+    readText += ` Composite table: a partition read here is all of its ${plural(per, `${p.subpartitionType} subpartition`)} (about ${fmt(Math.ceil(B / per))} blocks each)${sublvl ? `, gathered as ${fmt(o.partitionsRead * per)} subpartition tasks` : ", with no subpartition statistics gathered"}.`;
   }
   steps.push({ id: "read", title: "Read the table", status: units === 0 ? "skips" : "does", text: readText, reads: units ? `${fmt(o.blocks)} blocks` : "0 blocks", basis: flat ? "19c Tuning Guide; explainer chapter 5" : "19.27 lab, scaled to your numbers" });
   // columns
@@ -938,7 +1094,44 @@ export function verifySql(o: Outcome): string {
       "ORDER  BY partition_position NULLS FIRST;",
     );
   }
-  if (!isTrue(p.publish)) {
+  if (p.partitioned && p.subpartitioned) {
+    lines.push(
+      "",
+      "-- Composite table: does any subpartition have statistics? (GRANULARITY AUTO gathered none for HASH subpartitions in the lab)",
+      "SELECT COUNT(*) AS subpartitions, COUNT(last_analyzed) AS with_statistics",
+      "FROM   dba_tab_subpartitions",
+      `WHERE  table_owner = ${own} AND table_name = ${tab};`,
+    );
+  }
+  if (p.runBy === "hf" || p.hfTask === "ON") {
+    lines.push(
+      "",
+      "-- The high-frequency task: its preferences, and its runs (ORIGIN tells it from the nightly job)",
+      "SELECT DBMS_STATS.GET_PREFS('AUTO_TASK_STATUS') AS status, DBMS_STATS.GET_PREFS('AUTO_TASK_INTERVAL') AS interval_s,",
+      "       DBMS_STATS.GET_PREFS('AUTO_TASK_MAX_RUN_TIME') AS max_run_s FROM dual;",
+      "SELECT * FROM dba_auto_stat_executions ORDER BY 1 DESC FETCH FIRST 10 ROWS ONLY;",
+    );
+  }
+  if (p.realTimeStats) {
+    lines.push(
+      "",
+      "-- Real-time statistics: the parameter, and the rows that carry them (NOTES = STATS_ON_CONVENTIONAL_DML)",
+      "SELECT value FROM v$parameter WHERE name = 'optimizer_real_time_statistics';",
+      "SELECT partition_name, num_rows, blocks, last_analyzed, TRIM(notes) AS notes",
+      "FROM   dba_tab_statistics",
+      `WHERE  owner = ${own} AND table_name = ${tab} AND notes LIKE '%STATS_ON_CONVENTIONAL_DML%';`,
+    );
+  }
+  if (p.tableStats === "load") {
+    lines.push(
+      "",
+      "-- Statistics from a bulk load carry NOTES = STATS_ON_LOAD",
+      "SELECT partition_name, num_rows, blocks, last_analyzed, TRIM(notes) AS notes",
+      "FROM   dba_tab_statistics",
+      `WHERE  owner = ${own} AND table_name = ${tab} AND notes LIKE '%STATS_ON_LOAD%';`,
+    );
+  }
+  if (!isTrue(p.publish) || p.pendingStats) {
     lines.push("", "-- The pending statistics this gather produced", "SELECT table_name, partition_name, num_rows, last_analyzed", "FROM   dba_tab_pending_stats", `WHERE  owner = ${own} AND table_name = ${tab};`);
   }
   lines.push("", "-- Index statistics: when, from how many entries", "SELECT index_name, object_type, partition_name, last_analyzed, sample_size, global_stats", "FROM   dba_ind_statistics", `WHERE  table_owner = ${own} AND table_name = ${tab}`, "ORDER  BY index_name, object_type, partition_position NULLS FIRST;");

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { DEFAULTS, advise, clampInput, decodeInput, encodeInput, parsePrefs, setupScripts, type Input } from "../src/model";
+import { DEFAULTS, PRESETS, advise, clampInput, decodeInput, encodeInput, parsePrefs, setupScripts, type Input } from "../src/model";
 
 const run = (input: Partial<Input>) => advise({ ...DEFAULTS, ...input });
 const job: Partial<Input> = { runBy: "auto", incremental: "TRUE", synopses: "all", newPartitions: 0 };
@@ -125,5 +125,38 @@ describe("Oracle 19c documented semantics and collector integration", () => {
     expect(legacy.fixes.join("\n")).toMatch(/'APPROXIMATE_NDV_ALGORITHM', 'REPEAT OR HYPERLOGLOG'/);
     expect(run({ ...job, oldFormatPartitions: 2, allowMixedFormat: false, tableChangePercent: 15, useTableChangePercent: true }).partitionsRead).toBe(2);
     expect(run({ partitioned: false, oldFormatPartitions: 3 }).input.oldFormatPartitions).toBe(0);
+  });
+});
+
+describe("WP5 scenarios: fields round-trip through the URL hash and are clamped", () => {
+  test("every new field survives encode/decode", () => {
+    const set: Partial<Input> = {
+      subpartitioned: true, subpartitionType: "LIST", subpartitionsPerPartition: 12, exchanged: true, exchangeTargetGathered: true,
+      exchangeStageSynopsis: true, exchangeHistogramsMatch: true, realTimeStats: true, hfTask: "ON", hfInterval: 600, hfMaxRunTime: 1800,
+      pendingStats: true, runBy: "hf", callGranularity: "SUBPARTITION", granularity: "SUBPARTITION",
+    };
+    expect(decodeInput(encodeInput({ ...DEFAULTS, ...set }))).toEqual(set);
+    expect(encodeInput(DEFAULTS)).toBe("");
+  });
+  test("defaults, ranges and plain tables", () => {
+    expect(DEFAULTS).toMatchObject({ subpartitioned: false, subpartitionType: "HASH", subpartitionsPerPartition: 4, exchanged: false, exchangeTargetGathered: false, exchangeStageSynopsis: false, exchangeHistogramsMatch: false, realTimeStats: false, hfTask: "OFF", hfInterval: 900, hfMaxRunTime: 3600, pendingStats: false });
+    const { input, notes } = clampInput({ ...DEFAULTS, hfInterval: 5, hfMaxRunTime: 99999, subpartitionsPerPartition: 0 });
+    expect([input.hfInterval, input.hfMaxRunTime, input.subpartitionsPerPartition]).toEqual([60, 3600, 1]);
+    expect(notes.length).toBe(3);
+    const flat = clampInput({ ...DEFAULTS, partitioned: false, subpartitioned: true, exchanged: true }).input;
+    expect([flat.subpartitioned, flat.exchanged]).toEqual([false, false]);
+    expect(clampInput({ ...DEFAULTS, runBy: "bogus", subpartitionType: "X", hfTask: "maybe" }).input).toMatchObject({ runBy: "call", subpartitionType: "HASH", hfTask: "OFF" });
+    expect(clampInput({ runBy: "hf" }).input.runBy).toBe("hf");
+  });
+  test("every preset still advises without an error and the new ones tell their story", () => {
+    for (const pr of PRESETS) expect(() => run(pr.values)).not.toThrow();
+    const byId = (id: string) => run(PRESETS.find((x) => x.id === id)!.values);
+    expect(byId("exchange-ok").blocks).toBe(0);
+    expect(byId("exchange-bad").blocks).toBe(DEFAULTS.blocksPerPartition);
+    expect(byId("composite").findings.some((f) => /Composite table/.test(f.text))).toBe(true);
+    expect(byId("pending").fixes.join("\n")).toMatch(/PUBLISH_PENDING_STATS/);
+    expect(byId("pending-left").verdict[0]).toBe("warn");
+    expect(byId("hftask").verdict[0]).toBe("good");
+    expect(byId("realtime").findings.some((f) => /STATS_ON_CONVENTIONAL_DML/.test(f.text))).toBe(true);
   });
 });

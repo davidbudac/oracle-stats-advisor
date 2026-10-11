@@ -29,6 +29,12 @@ export function clampInput(raw: Partial<Record<keyof Input, unknown>> | null | u
   num("indexCount", 0, 500);
   num("localIndexCount", 0, Number(p.indexCount));
   if (!p.partitioned) p.localIndexCount = 0;
+  // composite tables, the exchange and the high-frequency task. AUTO_TASK_INTERVAL has a documented minimum of 60 seconds and
+  // AUTO_TASK_MAX_RUN_TIME a documented maximum of 3600 (19c SQL Tuning Guide, Configuring High-Frequency Automatic Optimizer Statistics Collection).
+  if (!p.partitioned) { p.subpartitioned = false; p.exchanged = false; }
+  num("subpartitionsPerPartition", 1, 1000);
+  num("hfInterval", 60, 86400);
+  num("hfMaxRunTime", 1, 3600);
   num("stalePercent", 0, Number.MAX_SAFE_INTEGER, false);
   num("changePercent", 0, Number.MAX_SAFE_INTEGER, false);
   num("tableChangePercent", 0, Number.MAX_SAFE_INTEGER, false);

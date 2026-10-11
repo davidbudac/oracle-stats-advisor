@@ -301,3 +301,238 @@ describe("column groups: what the table has, what the workload asks for, what cr
     expect(run({ ...flat, columnChange: "usage", methodOpt: "repeat" }).findings.some((f) => /does not choose histograms from column usage/.test(f.text))).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------- composite (subpartitioned) tables
+describe("composite tables (lab J)", () => {
+  const comp: Partial<Input> = { ...inc, partitions: 6, subpartitioned: true, subpartitionType: "HASH", subpartitionsPerPartition: 4, newPartitions: 0, changedPartitions: 1 };
+  test("GRANULARITY AUTO gathers no subpartition statistics: DML in one subpartition rereads the whole partition", () => {
+    const o = run(comp); // lab J
+    expect([o.partitionsRead, o.blocks, o.global]).toEqual([1, B, "merged"]);
+    const f = o.findings.find((x) => /^Composite table \(RANGE-HASH, 4 subpartitions per partition\)/.test(x.text))!;
+    expect(f.text).toMatch(/no subpartition statistics/);
+    expect(f.text).toMatch(/all 4 of its subpartitions are read/);
+    expect(f.basis).toMatch(/lab J/);
+    expect(o.findings.some((x) => /partname with a subpartition name is out of scope/.test(x.text))).toBe(true);
+    const step = stepsOf(o).find((s) => s.id === "read")!;
+    expect(step.text).toMatch(/Composite table: a partition read here is all of its 4 HASH subpartitions/);
+    expect(step.text).toMatch(/no subpartition statistics gathered/);
+    expect(verifySql(o)).toMatch(/dba_tab_subpartitions/);
+  });
+  test("LIST and RANGE subpartitions under AUTO are an inference, not a lab result", () => {
+    const hash = run(comp);
+    expect(hash.findings.some((x) => /Determines the granularity based on the partitioning type/.test(x.text))).toBe(false);
+    for (const subpartitionType of ["LIST", "RANGE"] as const) {
+      const o = run({ ...comp, subpartitionType });
+      const w = o.findings.find((x) => x.level === "warn" && /Determines the granularity based on the partitioning type/.test(x.text))!;
+      expect(w.text).toMatch(new RegExp(`For ${subpartitionType} subpartitions the advisor assumes the same as for HASH, but this is inferred`));
+      expect(w.basis).toMatch(/inferred for LIST and RANGE/);
+      expect(o.blocks).toBe(hash.blocks); // the read model keeps partition units
+    }
+  });
+  test("granularity ALL and SUBPARTITION gather subpartition statistics: more tasks, the same blocks", () => {
+    const all = run({ ...comp, callGranularity: "ALL" });
+    expect([all.blocks, all.global]).toEqual([B, "merged"]);
+    const f = all.findings.find((x) => /also gathers subpartition statistics/.test(x.text))!;
+    expect(f.text).toMatch(/1 partition read is 4 subpartition gathers/);
+    expect(all.findings.some((x) => /only gathers statistics for modified subpartitions/.test(x.text))).toBe(true);
+    expect(stepsOf(all).find((s) => s.id === "read")!.text).toMatch(/gathered as 4 subpartition tasks/);
+    const sub = run({ ...comp, callGranularity: "SUBPARTITION" });
+    expect(sub.global).toBe("untouched"); // like PARTITION: inferred, the level below the table only
+    expect(sub.findings.some((x) => /SUBPARTITION gathers that level only/.test(x.text))).toBe(true);
+    expect(sub.fixes.join("\n")).not.toMatch(/GRANULARITY/); // the call, not the preference, asked for it
+    expect(run({ ...comp, granularity: "SUBPARTITION" }).fixes.join("\n")).toMatch(/'GRANULARITY', 'AUTO'/);
+    expect(run({ ...comp, incremental: "FALSE", callGranularity: "ALL" }).findings.some((x) => /every subpartition of every partition is read/.test(x.text))).toBe(true);
+  });
+  test("a plain table, or an unticked box, gets no composite findings", () => {
+    expect(run({ ...inc }).findings.some((x) => /Composite table/.test(x.text))).toBe(false);
+    expect(run({ partitioned: false, subpartitioned: true }).input.subpartitioned).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------- partition exchange (lab H1-H7, V3, V3b, Tg)
+describe("a partition exchanged in since the last gather", () => {
+  const ex = { ...inc, exchanged: true } as Partial<Input>;
+  const all3 = { exchangeTargetGathered: true, exchangeStageSynopsis: true, exchangeHistogramsMatch: true };
+  test("with all three conditions the gather reads nothing and merges the global statistics (lab H5, V3, Tg)", () => {
+    const o = run({ ...ex, ...all3 });
+    expect([o.partitionsRead, o.blocks, o.global, o.globalNotes, o.verdict[0]]).toEqual([0, 0, "merged", "INCREMENTAL", "good"]);
+    expect(o.findings.some((f) => f.level === "good" && /The exchanged partition is not read/.test(f.text))).toBe(true);
+    expect(o.findings.find((f) => /The exchanged partition is not read/.test(f.text))!.basis).toMatch(/lab H5, V3, V3b, Tg/);
+    expect(o.fixes.join("\n")).not.toMatch(/Exchange recipe/);
+    expect(o.next!.input.exchanged).toBe(false); // consumed
+    // other new partitions are still read; only the exchanged one is free
+    expect(run({ ...ex, ...all3, newPartitions: 3 }).partitionsRead).toBe(2);
+    expect(run({ ...ex, ...all3, newPartitions: 0, changedPartitions: 2 }).partitionsRead).toBe(1);
+  });
+  test("each missing condition makes the exchanged partition a reread (lab H1, H3, H6, H7)", () => {
+    for (const [key, id] of [["exchangeTargetGathered", /H1, H2, H3/], ["exchangeStageSynopsis", /H3, H4, H7/], ["exchangeHistogramsMatch", /H6/]] as const) {
+      const o = run({ ...ex, ...all3, [key]: false });
+      expect([o.partitionsRead, o.blocks, o.verdict[0]]).toEqual([1, B, "warn"]);
+      const w = o.findings.find((f) => f.level === "warn" && /The exchanged partition is read again/.test(f.text))!;
+      expect(w.text).toMatch(id);
+      expect(w.text).toMatch(/The new partition must have a synopsis before the exchange/);
+    }
+    // nothing else counted: the exchanged partition itself is read like a new one
+    expect(run({ ...ex, newPartitions: 0, changedPartitions: 0 }).partitionsRead).toBe(1);
+  });
+  test("the fix is the V3 recipe, in order, with the names filled in", () => {
+    const o = run({ ...ex, owner: "SHOP", tableName: "SALES", newPartitionName: "SALES_2025_12", methodOpt: "auto" });
+    const recipe = o.fixes.filter((f) => !/^-- Exchange recipe/.test(f));
+    const at = (re: RegExp) => o.fixes.findIndex((f) => re.test(f));
+    expect(o.fixes.some((f) => /^-- Exchange recipe/.test(f))).toBe(true);
+    expect(recipe.length).toBeGreaterThan(6);
+    const order = [
+      /SET_TABLE_PREFS\('SHOP', 'SALES', 'METHOD_OPT', 'FOR ALL COLUMNS SIZE AUTO'\)/,
+      /SET_TABLE_PREFS\('SHOP', 'STAGING_TABLE', 'METHOD_OPT', 'FOR ALL COLUMNS SIZE AUTO'\)/,
+      /SET_TABLE_PREFS\('SHOP', 'STAGING_TABLE', 'INCREMENTAL', 'TRUE'\)/,
+      /SET_TABLE_PREFS\('SHOP', 'STAGING_TABLE', 'INCREMENTAL_LEVEL', 'TABLE'\)/,
+      /GATHER_TABLE_STATS\('SHOP', 'SALES', partname => 'SALES_2025_12', granularity => 'PARTITION'\)/,
+      /GATHER_TABLE_STATS\('SHOP', 'STAGING_TABLE'\)/,
+      /ALTER TABLE SHOP\.SALES EXCHANGE PARTITION SALES_2025_12 WITH TABLE STAGING_TABLE/,
+      /GATHER_TABLE_STATS\('SHOP', 'SALES'\)  --/,
+    ].map(at);
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+  test("without INCREMENTAL the exchange is an ordinary new or changed partition", () => {
+    const o = run({ exchanged: true, ...all3 });
+    const f = o.findings.find((x) => /INCREMENTAL is FALSE: there are no synopses to carry over/.test(x.text))!;
+    expect(f.text).toMatch(/simply makes the partition new or changed/);
+    expect(o.blocks).toBe(run({}).blocks); // the same two passes as without the exchange
+    expect(o.fixes.join("\n")).not.toMatch(/Exchange recipe/);
+  });
+  test("a gather that runs the old way saves nothing; the job treats the exchanged partition the same way", () => {
+    const old = run({ ...ex, ...all3, callEstimatePercent: 10 });
+    expect(old.findings.some((x) => /prepared correctly, but the gather runs the old way/.test(x.text))).toBe(true);
+    expect(old.blocks).toBe(2 * T);
+    const job = run({ ...ex, ...all3, runBy: "auto", tableChangePercent: 0.5, useTableChangePercent: true });
+    expect(job.partitionsRead).toBe(0);
+    const jobBad = run({ ...ex, runBy: "auto", tableChangePercent: 0.5, useTableChangePercent: true });
+    expect(jobBad.partitionsRead).toBe(1);
+    expect(run({ ...ex, ...all3, partitioned: false }).input.exchanged).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------- real-time statistics
+describe("real-time statistics", () => {
+  const flat: Partial<Input> = { partitioned: false, blocksPerPartition: 18000, numRows: 1000000 };
+  test("findings only: the gather reads what it read, the documentation is quoted, the licence is flagged", () => {
+    const base = run(flat), rt = run({ ...flat, realTimeStats: true });
+    expect([rt.blocks, rt.verdict[0], rt.fixes]).toEqual([base.blocks, base.verdict[0], base.fixes]);
+    const f = rt.findings.find((x) => /STATS_ON_CONVENTIONAL_DML/.test(x.text))!;
+    expect(f.text).toMatch(/augment rather than replace traditional statistics/);
+    expect(f.text).toMatch(/no NDV, histogram, index statistics or synopsis/);
+    expect(f.basis).toMatch(/Real-Time Statistics/);
+    const lic = rt.findings.find((x) => x.level === "warn" && /Table 1-8 Performance/.test(x.text))!;
+    expect(lic.text).toMatch(/Available on Exadata\. Not available on Oracle Database Appliance\./);
+    expect(base.findings.some((x) => /STATS_ON_CONVENTIONAL_DML/.test(x.text))).toBe(false);
+    expect(verifySql(rt)).toMatch(/optimizer_real_time_statistics/);
+  });
+  test("partitioned: partition rows and synopses are not touched", () => {
+    const o = run({ ...inc, realTimeStats: true });
+    expect(o.blocks).toBe(run(inc).blocks);
+    expect(o.findings.find((x) => /STATS_ON_CONVENTIONAL_DML/.test(x.text))!.text).toMatch(/partition-level statistics are not supported/);
+  });
+});
+
+// ---------------------------------------------------------------- the high-frequency automatic task
+describe("the high-frequency automatic task", () => {
+  const flat: Partial<Input> = { partitioned: false, blocksPerPartition: 18000, numRows: 1000000, newPartitions: 0 };
+  test("modelled like the nightly job: stale tables only, STALE_PERCENT", () => {
+    const stale = run({ ...flat, runBy: "hf", hfTask: "ON", tableChangePercent: 12 });
+    const night = run({ ...flat, runBy: "auto", tableChangePercent: 12 });
+    expect([stale.blocks, stale.auto.stale, stale.verdict[0], stale.sql.startsWith("-- The high-frequency")]).toEqual([night.blocks, true, "good", true]);
+    expect(stale.resolved.find((r) => r.param === "options")!.value).toBe("GATHER AUTO");
+    const fresh = run({ ...flat, runBy: "hf", hfTask: "ON", tableChangePercent: 4 });
+    expect([fresh.blocks, fresh.auto.stale]).toEqual([0, false]);
+    // a partitioned table: the same "global left behind" behaviour as the nightly job (inferred)
+    const part = run({ ...inc, runBy: "hf", hfTask: "ON" });
+    expect([part.partitionsRead, part.global]).toEqual([1, "untouched"]);
+    expect(stepsOf(stale).find((s) => s.id === "resolve")!.text).toMatch(/^The high-frequency task passes no parameters/);
+  });
+  test("interval, run time, licence and the inferred equivalence are stated", () => {
+    const o = run({ ...flat, runBy: "hf", hfTask: "ON", hfInterval: 600, hfMaxRunTime: 1800, tableChangePercent: 12 });
+    const f = o.findings.find((x) => /runs every 600 seconds/.test(x.text))!;
+    expect(f.text).toMatch(/144 runs a day/);
+    expect(f.text).toMatch(/each run lasts at most 1,800 seconds|each run lasts at most 1800 seconds/);
+    expect(f.text).toMatch(/"lightweight" and "only gathers stale statistics"/);
+    expect(f.text).toMatch(/it will not execute while the maintenance window auto stats gathering job is executing/);
+    const inferred = o.findings.find((x) => /models a run like the nightly job/.test(x.text))!;
+    expect(inferred.basis).toMatch(/^inferred, not observed/);
+    expect(inferred.text).toMatch(/AUTOSTATS_TARGET/);
+    const lic = o.findings.find((x) => x.level === "warn" && /High-Frequency Automatic Optimizer Statistics Collection/.test(x.text))!;
+    expect(lic.text).toMatch(/Available on Exadata\. Not available on Oracle Database Appliance\./);
+    expect(verifySql(o)).toMatch(/dba_auto_stat_executions/);
+  });
+  test("runBy hf with the task OFF: a warning and the SET_GLOBAL_PREFS fix; ON beside another run mode: a note", () => {
+    const off = run({ ...flat, runBy: "hf", tableChangePercent: 12 });
+    expect(off.verdict).toEqual(["warn", "The high-frequency task is switched off"]);
+    expect(off.fixes).toContain("EXEC DBMS_STATS.SET_GLOBAL_PREFS('AUTO_TASK_STATUS', 'ON')");
+    const beside = run({ ...flat, hfTask: "ON", tableChangePercent: 12 });
+    expect(beside.blocks).toBe(run({ ...flat, tableChangePercent: 12 }).blocks);
+    expect(beside.findings.some((x) => /high-frequency task is switched on/.test(x.text))).toBe(true);
+    expect(run(flat).findings.some((x) => /high-frequency/.test(x.text))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------- pending statistics
+describe("pending statistics workflow", () => {
+  test("PUBLISH FALSE: the test-and-publish recipe, with the verified signatures", () => {
+    const o = run({ partitioned: false, publish: "FALSE", owner: "SHOP", tableName: "SALES" });
+    const fx = o.fixes.join("\n");
+    expect(fx).toMatch(/ALTER SESSION SET OPTIMIZER_USE_PENDING_STATISTICS = TRUE/);
+    expect(fx).toMatch(/SELECT \* FROM TABLE\(DBMS_STATS\.DIFF_TABLE_STATS_IN_PENDING\('SHOP', 'SALES', NULL, 10\)\)/);
+    expect(fx).toMatch(/EXEC DBMS_STATS\.PUBLISH_PENDING_STATS\('SHOP', 'SALES'\)/);
+    expect(fx).toMatch(/EXEC DBMS_STATS\.DELETE_PENDING_STATS\('SHOP', 'SALES'\)/);
+    expect(fx).toMatch(/'PUBLISH', 'TRUE'/);
+    expect(run({ partitioned: false }).fixes.join("\n")).not.toMatch(/PENDING_STATS/);
+    expect(verifySql(o)).toMatch(/dba_tab_pending_stats/);
+  });
+  test("pending rows left behind under INCREMENTAL: published statistics leave the synopses out of step (lab G1, Tf)", () => {
+    const o = run({ ...inc, pendingStats: true });
+    const w = o.findings.find((x) => x.level === "warn" && /Pending statistics exist for the table/.test(x.text))!;
+    expect(w.text).toMatch(/gathered without synopses/);
+    expect(w.text).toMatch(/leaves the global NOTES blank and the next gather reads every partition again/);
+    expect(w.basis).toMatch(/G1, G1c, Tf/);
+    expect(o.fixes.join("\n")).toMatch(/DELETE_PENDING_STATS\('OWNER', 'TABLE'\)/);
+    expect(o.verdict[0]).toBe("warn");
+    expect(o.blocks).toBe(run(inc).blocks);
+    const plain = run({ partitioned: false, pendingStats: true });
+    expect(plain.findings.find((x) => /Pending statistics exist/.test(x.text))!.text).not.toMatch(/INCREMENTAL/);
+    expect(verifySql(plain)).toMatch(/dba_tab_pending_stats/);
+  });
+});
+
+// ---------------------------------------------------------------- statistics from a bulk load
+describe("online statistics from a bulk load (STATS_ON_LOAD)", () => {
+  const load: Partial<Input> = { partitioned: false, blocksPerPartition: 18000, numRows: 1000000, indexCount: 2, localIndexCount: 0, tableStats: "load" };
+  test("the restrictions are quoted and the gather-AUTO fix is offered after a plain gather", () => {
+    const o = run(load);
+    const f = o.findings.find((x) => /STATS_ON_LOAD/.test(x.text) && /online statistics gathering/.test(x.text))!;
+    for (const q of ["INSERT INTO ... SELECT using a direct path insert, and CREATE TABLE AS SELECT", "Bulk loads only gather online statistics automatically when the object is empty", "has a PUBLISH preference set to FALSE", "Its statistics are locked", "the database does not automatically create histograms"]) expect(f.text).toContain(q);
+    expect(f.basis).toMatch(/Online Statistics Gathering for Bulk Loads/);
+    expect(o.blocks).toBe(18000); // a plain GATHER rereads the table
+    expect(o.fixes).toContain("EXEC DBMS_STATS.GATHER_TABLE_STATS('OWNER', 'TABLE', options => 'GATHER AUTO')");
+    expect(o.fixes).toContain("EXEC DBMS_STATS.SET_TABLE_PREFS('OWNER', 'TABLE', 'OPTIONS', 'GATHER AUTO')");
+    expect(o.verdict[0]).toBe("good");
+    const auto = run({ ...load, callOptions: "GATHER AUTO" });
+    expect(auto.blocks).toBe(0);
+    expect(auto.fixes.join("\n")).not.toMatch(/options => 'GATHER AUTO'/);
+    expect(auto.findings.find((x) => /load left table and basic column statistics/.test(x.text))!.basis).toMatch(/does not gather table and basic column statistics collected during the bulk load/);
+  });
+  test("a locked table: ORA-20005 unless force, and no online statistics under a lock; PUBLISH FALSE gathers none either", () => {
+    const o = run({ ...load, tableLocked: true });
+    expect([o.error, o.blocks]).toEqual(["ORA-20005", 0]);
+    expect(o.findings.some((x) => x.level === "warn" && /gathers no online statistics \(a documented restriction\)/.test(x.text))).toBe(true);
+    expect(o.fixes.indexOf("EXEC DBMS_STATS.UNLOCK_TABLE_STATS('OWNER', 'TABLE')")).toBeLessThan(o.fixes.findIndex((f) => /options => 'GATHER AUTO'/.test(f)));
+    expect(run({ ...load, tableLocked: true, force: true }).error).toBeNull();
+    expect(run({ ...load, publish: "FALSE" }).findings.some((x) => /PUBLISH is FALSE, and a bulk load gathers no online statistics/.test(x.text))).toBe(true);
+  });
+  test("partitioned: global statistics from the insert, partition statistics and a synopsis with partition-extended syntax", () => {
+    const o = run({ ...inc, tableStats: "load" });
+    const f = o.findings.find((x) => /On a partitioned table/.test(x.text))!;
+    expect(f.text).toMatch(/the database does not gather partition-level statistics/);
+    expect(f.text).toMatch(/also gathers a synopsis/);
+    expect(o.blocks).toBe(B); // not modelled: the read count is the form's
+  });
+});

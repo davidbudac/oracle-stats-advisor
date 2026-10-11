@@ -1,7 +1,7 @@
 // The input of the advisor: every field, its allowed values and Oracle's defaults.
 // Pure data, no DOM.
 
-export const GRANULARITIES = ["AUTO", "GLOBAL", "PARTITION", "GLOBAL AND PARTITION", "APPROX_GLOBAL AND PARTITION", "ALL"] as const;
+export const GRANULARITIES = ["AUTO", "GLOBAL", "PARTITION", "GLOBAL AND PARTITION", "APPROX_GLOBAL AND PARTITION", "ALL", "SUBPARTITION"] as const;
 export type Granularity = (typeof GRANULARITIES)[number];
 
 export const METHOD_OPTS = ["auto", "skewonly", "repeat", "pinned", "size1"] as const;
@@ -19,7 +19,7 @@ export const OPTIONS = {
   options: ["GATHER", "GATHER AUTO"],
   overrides: ["TRUE", "FALSE"],
   ndvAlgorithm: ["REPEAT OR HYPERLOGLOG", "ADAPTIVE SAMPLING", "HYPERLOGLOG"],
-  runBy: ["call", "auto"],
+  runBy: ["call", "auto", "hf"],
   partname: ["none", "new", "changed"],
   callGranularity: ["none", ...GRANULARITIES],
   callMethodOpt: ["none", ...METHOD_OPTS],
@@ -30,19 +30,22 @@ export const OPTIONS = {
   tableStats: ["gathered", "none", "load"],
   columnChange: ["none", "usage", "group", "histogram"],
   autoStatExtensions: ["OFF", "ON"],
+  subpartitionType: ["HASH", "LIST", "RANGE"],
+  hfTask: ["OFF", "ON"],
 } as const;
 export type OptionKey = keyof typeof OPTIONS;
 
 export const NUMBERS = [
   "partitions", "blocksPerPartition", "numRows", "columnCount", "indexCount", "localIndexCount",
   "stalePercent", "changePercent", "tableChangePercent", "newPartitions", "changedPartitions", "lockedPartitions", "lockedChanged", "oldFormatPartitions",
-  "columnGroups", "columnGroupCandidates",
+  "columnGroups", "columnGroupCandidates", "subpartitionsPerPartition", "hfInterval", "hfMaxRunTime",
 ] as const;
 export type NumberKey = (typeof NUMBERS)[number];
 
 export const BOOLS = [
   "partitioned", "histogramsPresent", "columnUsageRecorded", "useTableChangePercent",
   "useStalePercent", "useLockedStats", "allowMixedFormat", "force", "callBlockSample", "lockedNoSynopsis", "tableLocked",
+  "subpartitioned", "exchanged", "exchangeTargetGathered", "exchangeStageSynopsis", "exchangeHistogramsMatch", "realTimeStats", "pendingStats",
 ] as const;
 export type BoolKey = (typeof BOOLS)[number];
 
@@ -74,6 +77,10 @@ export interface Input {
   columnGroups: number;
   /** Column sets with no group yet that a group would help: a SQL plan directive with equality predicates only, or a group SEED_COL_USAGE recorded. */
   columnGroupCandidates: number;
+  /** A composite (subpartitioned) table: every partition has `subpartitionsPerPartition` subpartitions of `subpartitionType`. */
+  subpartitioned: boolean;
+  subpartitionType: "HASH" | "LIST" | "RANGE";
+  subpartitionsPerPartition: number;
   // preferences in force
   incremental: "TRUE" | "FALSE";
   incrementalLevel: "PARTITION" | "TABLE";
@@ -92,8 +99,14 @@ export interface Input {
   stalePercent: number;
   overrides: "TRUE" | "FALSE";
   autoStatExtensions: "OFF" | "ON";
+  /** Global preferences of the high-frequency automatic task: AUTO_TASK_STATUS, AUTO_TASK_INTERVAL and AUTO_TASK_MAX_RUN_TIME, in seconds. */
+  hfTask: "OFF" | "ON";
+  hfInterval: number;
+  hfMaxRunTime: number;
+  /** optimizer_real_time_statistics is TRUE (Exadata and cloud only in 19c). */
+  realTimeStats: boolean;
   // the call
-  runBy: "call" | "auto";
+  runBy: "call" | "auto" | "hf";
   partname: "none" | "new" | "changed";
   callGranularity: "none" | Granularity;
   callEstimatePercent: CallPercent;
@@ -117,6 +130,13 @@ export interface Input {
   oldFormatPartitions: number;
   tableLocked: boolean;
   columnChange: "none" | "usage" | "group" | "histogram";
+  /** A partition was exchanged in since the last gather, and what was prepared before the exchange. */
+  exchanged: boolean;
+  exchangeTargetGathered: boolean;
+  exchangeStageSynopsis: boolean;
+  exchangeHistogramsMatch: boolean;
+  /** Rows exist in DBA_TAB_PENDING_STATS for the table. */
+  pendingStats: boolean;
 }
 
 /** Oracle's global defaults, so the page first shows what an untouched table does. The table is the explainer's SHOP.SALES. */
@@ -137,6 +157,9 @@ export const DEFAULTS: Readonly<Input> = Object.freeze({
   columnUsageRecorded: true,
   columnGroups: 0,
   columnGroupCandidates: 0,
+  subpartitioned: false,
+  subpartitionType: "HASH",
+  subpartitionsPerPartition: 4,
   incremental: "FALSE",
   incrementalLevel: "PARTITION",
   useStalePercent: false,
@@ -154,6 +177,10 @@ export const DEFAULTS: Readonly<Input> = Object.freeze({
   stalePercent: 10,
   overrides: "FALSE",
   autoStatExtensions: "OFF",
+  hfTask: "OFF",
+  hfInterval: 900,
+  hfMaxRunTime: 3600,
+  realTimeStats: false,
   runBy: "call",
   partname: "none",
   callGranularity: "none",
@@ -177,6 +204,11 @@ export const DEFAULTS: Readonly<Input> = Object.freeze({
   oldFormatPartitions: 0,
   tableLocked: false,
   columnChange: "none",
+  exchanged: false,
+  exchangeTargetGathered: false,
+  exchangeStageSynopsis: false,
+  exchangeHistogramsMatch: false,
+  pendingStats: false,
 });
 
 /** The setup of the explainer's chapter 8, example 1: the append-only table. Applied on top of the current form. */
@@ -227,6 +259,10 @@ export const FIELD_LABELS: Record<keyof Input, string> = {
   partitioned: "Partitioned", partitions: "Partitions", blocksPerPartition: "Blocks per partition", numRows: "Rows", columnCount: "Columns",
   indexCount: "Indexes", localIndexCount: "Local indexes", histogramsPresent: "Histograms exist today", columnUsageRecorded: "Column usage recorded",
   columnGroups: "Column groups", columnGroupCandidates: "Column group candidates", autoStatExtensions: "AUTO_STAT_EXTENSIONS",
+  subpartitioned: "Subpartitioned (composite)", subpartitionType: "Subpartition type", subpartitionsPerPartition: "Subpartitions per partition",
+  hfTask: "AUTO_TASK_STATUS", hfInterval: "AUTO_TASK_INTERVAL (s)", hfMaxRunTime: "AUTO_TASK_MAX_RUN_TIME (s)", realTimeStats: "Real-time statistics",
+  exchanged: "A partition was exchanged in since the last gather", exchangeTargetGathered: "The empty target partition was gathered before the exchange",
+  exchangeStageSynopsis: "The staging table had a table-level synopsis", exchangeHistogramsMatch: "The histograms match on both sides", pendingStats: "Pending statistics",
   incremental: "INCREMENTAL", incrementalLevel: "INCREMENTAL_LEVEL", useStalePercent: "USE_STALE_PERCENT", useLockedStats: "USE_LOCKED_STATS",
   allowMixedFormat: "ALLOW_MIXED_FORMAT", ndvAlgorithm: "APPROXIMATE_NDV_ALGORITHM", publish: "PUBLISH", estimatePercent: "ESTIMATE_PERCENT", granularity: "GRANULARITY", methodOpt: "METHOD_OPT",
   cascade: "CASCADE", noInvalidate: "NO_INVALIDATE", options: "OPTIONS", degree: "DEGREE", stalePercent: "STALE_PERCENT", overrides: "PREFERENCE_OVERRIDES_PARAMETER",
@@ -251,4 +287,11 @@ export const PRESETS: readonly Preset[] = [
   { id: "staged", label: "Build synopses one partition per night", blurb: "partname + granularity PARTITION on a table without synopses (example 5).", values: { incremental: "TRUE", synopses: "none", partname: "new", callGranularity: "PARTITION" } },
   { id: "colgroup", label: "A column group the optimizer asked for", blurb: "A plain table with a SQL plan directive on two correlated columns (equality predicates) and no column group yet.", values: { partitioned: false, blocksPerPartition: 1200, numRows: 200000, columnCount: 7, indexCount: 0, localIndexCount: 0, newPartitions: 0, columnGroupCandidates: 1 } },
   { id: "onload", label: "After a direct-path load", blurb: "A plain table with STATS_ON_LOAD statistics and OPTIONS GATHER AUTO: histograms and indexes only.", values: { partitioned: false, blocksPerPartition: 18000, numRows: 1000000, columnCount: 9, indexCount: 2, localIndexCount: 0, newPartitions: 0, tableStats: "load", callOptions: "GATHER AUTO" } },
+  { id: "composite", label: "Composite table: range-hash", blurb: "Six range partitions with four hash subpartitions each (lab J), GRANULARITY AUTO: no subpartition statistics, and DML in one subpartition rereads the whole partition.", values: { incremental: "TRUE", synopses: "all", partitions: 6, blocksPerPartition: 4000, numRows: 600000, subpartitioned: true, subpartitionType: "HASH", subpartitionsPerPartition: 4, newPartitions: 0, changedPartitions: 1, changePercent: 2 } },
+  { id: "exchange-bad", label: "Partition exchange, not prepared", blurb: "A staged month was exchanged in: the staging table has a table-level synopsis, but the empty target partition was not gathered and the histograms differ (lab H1, H6).", values: { incremental: "TRUE", synopses: "all", exchanged: true, exchangeStageSynopsis: true, exchangeTargetGathered: false, exchangeHistogramsMatch: false } },
+  { id: "exchange-ok", label: "Partition exchange, prepared", blurb: "The V3 recipe: same METHOD_OPT on both tables, the empty target gathered, the stage gathered with a table-level synopsis. The gather reads nothing (lab H5, V3).", values: { incremental: "TRUE", synopses: "all", exchanged: true, exchangeStageSynopsis: true, exchangeTargetGathered: true, exchangeHistogramsMatch: true } },
+  { id: "realtime", label: "Real-time statistics on a busy table", blurb: "A plain table that takes inserts all day with optimizer_real_time_statistics on (Exadata and cloud only in 19c): the gather is unchanged.", values: { partitioned: false, blocksPerPartition: 18000, numRows: 1000000, columnCount: 9, indexCount: 2, localIndexCount: 0, newPartitions: 0, tableChangePercent: 6, realTimeStats: true } },
+  { id: "hftask", label: "The high-frequency task", blurb: "A plain table found stale by the task that runs every 15 minutes (Exadata and cloud only in 19c).", values: { partitioned: false, blocksPerPartition: 18000, numRows: 1000000, columnCount: 9, indexCount: 2, localIndexCount: 0, newPartitions: 0, tableChangePercent: 12, runBy: "hf", hfTask: "ON" } },
+  { id: "pending", label: "Gather into pending, test, publish", blurb: "PUBLISH FALSE on a plain table: the recipe with OPTIMIZER_USE_PENDING_STATISTICS, DIFF_TABLE_STATS_IN_PENDING and PUBLISH_PENDING_STATS.", values: { partitioned: false, blocksPerPartition: 18000, numRows: 1000000, columnCount: 9, indexCount: 2, localIndexCount: 0, newPartitions: 0, publish: "FALSE" } },
+  { id: "pending-left", label: "Pending statistics left behind", blurb: "PUBLISH is TRUE again, but the pending rows of an earlier test remain on an incremental table (lab G1, Tf).", values: { incremental: "TRUE", synopses: "all", pendingStats: true } },
 ];

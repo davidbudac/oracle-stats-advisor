@@ -66,6 +66,17 @@ after each. Same privileges and invocation as `collect.sql`; nothing is changed 
 SQL> @recommend.sql SHOP SALES
 ```
 
+### Survey a schema
+
+To pick the tables worth a closer look, `sql/survey.sql` ranks all tables of one schema by how many
+blocks a plain `GATHER_TABLE_STATS` would read (the advisor's rules in simplified form), one line per
+table with its preferences, state (stale, locked, pending, synopses), the last gather and the
+`@collect.sql` call to run next. Same privileges, nothing is changed or gathered:
+
+```
+SQL> @survey.sql SHOP
+```
+
 ## What it models
 
 - **A partitioned table under `GATHER_TABLE_STATS`**: INCREMENTAL and its four conditions
@@ -122,6 +133,7 @@ src/ui/                form builder, result renderer, stacked bar, DOM helpers
 src/style.css          tokens (light and dark), layout, components
 sql/collect.sql        the collector script (copied into dist/ as collect.sql)
 sql/recommend.sql      current vs recommended preferences for one table, standalone (not in the build)
+sql/survey.sql         the tables of one schema ranked by the blocks a plain gather reads, standalone (not in the build)
 test/                  vitest: advise.test.ts, parse.test.ts, setup.test.ts
 docs/lab-observations.md   the 19.27 lab log the partitioned rules cite
 ```

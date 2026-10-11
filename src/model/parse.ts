@@ -7,6 +7,7 @@
 
 import { GRANULARITIES, NAME_MAX, OPTIONS, type Input } from "./defaults";
 import { emptyProvenance, type GroupCandidate, type Provenance } from "./setup";
+import { parseDetail, type Detail } from "./detail";
 
 const ALIASES: Record<string, string> = {
   incremental: "INCREMENTAL", incremental_level: "INCREMENTAL_LEVEL", incr_level: "INCREMENTAL_LEVEL",
@@ -17,8 +18,8 @@ const ALIASES: Record<string, string> = {
   approximate_ndv_algorithm: "APPROXIMATE_NDV_ALGORITHM", auto_stat_extensions: "AUTO_STAT_EXTENSIONS",
 };
 const UNMODELLED = new Set(["AUTOSTATS_TARGET", "TABLE_CACHED_BLOCKS",
-  "GLOBAL_TEMP_TABLE_STATS", "WAIT_TIME_TO_UPDATE_STATS", "ROOT_TRIGGER_PDB", "JOB_OVERHEAD", "JOB_OVERHEAD_PERC", "CONCURRENT", "AUTO_TASK_STATUS",
-  "AUTO_TASK_MAX_RUN_TIME", "AUTO_TASK_INTERVAL", "INCREMENTAL_INTERNAL_CONTROL", "NDV_ALGORITHM", "SCAN_RATE", "MAXIMUM_AUTO_SAMPLE_PERCENT", "STAT_CATEGORY", "COORDINATOR_TRIGGER_SHARD"]);
+  "GLOBAL_TEMP_TABLE_STATS", "WAIT_TIME_TO_UPDATE_STATS", "ROOT_TRIGGER_PDB", "JOB_OVERHEAD", "JOB_OVERHEAD_PERC", "CONCURRENT",
+  "INCREMENTAL_INTERNAL_CONTROL", "NDV_ALGORITHM", "SCAN_RATE", "MAXIMUM_AUTO_SAMPLE_PERCENT", "STAT_CATEGORY", "COORDINATOR_TRIGGER_SHARD"]);
 const canonical = (name: string): string | null => ALIASES[String(name).trim().toLowerCase()] ?? null;
 
 type Kind = "name" | "number" | "option" | "flag";
@@ -35,6 +36,9 @@ const FORM_KEYS: Record<string, [keyof Input, Kind]> = {
   TABLE_CHANGE_PERCENT: ["tableChangePercent", "number"], LOCKED_PARTITIONS: ["lockedPartitions", "number"],
   LOCKED_CHANGED: ["lockedChanged", "number"], SYNOPSES: ["synopses", "option"], TABLE_STATS: ["tableStats", "option"], COLUMN_CHANGE: ["columnChange", "option"],
   LOCKED_NO_SYNOPSIS: ["lockedNoSynopsis", "flag"], TABLE_LOCKED: ["tableLocked", "flag"], OLD_FORMAT_PARTITIONS: ["oldFormatPartitions", "number"],
+  SUBPARTITIONED: ["subpartitioned", "flag"], SUBPARTITION_TYPE: ["subpartitionType", "option"], SUBPARTITIONS_PER_PARTITION: ["subpartitionsPerPartition", "number"],
+  REALTIME_STATS: ["realTimeStats", "flag"], PENDING_STATS: ["pendingStats", "flag"],
+  AUTO_TASK_STATUS: ["hfTask", "option"], AUTO_TASK_INTERVAL: ["hfInterval", "number"], AUTO_TASK_MAX_RUN_TIME: ["hfMaxRunTime", "number"],
 };
 
 type Values = Partial<Record<keyof Input, unknown>>;
@@ -52,9 +56,10 @@ function applyKey(name: string, raw: unknown, values: Values): R {
     return { ok: true };
   }
   if (kind === "option") {
-    const o = v.toLowerCase();
+    // the list's own spelling wins: synopses is lower case, subpartitionType and hfTask are upper case
     const list = (OPTIONS as Record<string, readonly string[]>)[field] ?? [];
-    if (!list.includes(o)) return { ok: false, reason: `expected ${list.join(", ")}` };
+    const o = list.find((x) => x.toLowerCase() === v.toLowerCase());
+    if (o === undefined) return { ok: false, reason: `expected ${list.join(", ")}` };
     values[field] = o;
     return { ok: true };
   }
@@ -148,7 +153,13 @@ function applyPref(name: string, raw: unknown, values: Values, notes: string[]):
   return { ok: true };
 }
 
-export interface Parsed { values: Partial<Input>; recognised: string[]; ignored: string[]; ignoredDetail: { line: string; reason: string }[]; notes: string[]; provenance: Provenance }
+export interface Parsed {
+  values: Partial<Input>; recognised: string[]; ignored: string[]; ignoredDetail: { line: string; reason: string }[]; notes: string[]; provenance: Provenance;
+  /** The ADVISOR DETAIL block, or null when the paste had none (an older collect.sql, or only preferences). */
+  detail: Detail | null;
+  /** Lines of the detail block the parser could not read, with the reason. Kept apart from `ignored`, which is about the form. */
+  detailIgnored: { line: string; reason: string }[];
+}
 
 /** The list keys of the collector's block, read into the provenance rather than the form. */
 const LIST_KEYS: Record<string, "tablePrefs" | "histogramColumns"> = { TABLE_PREFS: "tablePrefs", HISTOGRAM_COLUMNS: "histogramColumns" };
@@ -204,6 +215,15 @@ export function parsePrefs(text: string | null | undefined): Parsed {
   };
 
   let source = String(text ?? "");
+  const parsedDetail = parseDetail(source.split(/\r?\n/));
+  // the detail block is never form input: cut it out so its records are not read as preferences
+  const detailBegin = source.search(/ADVISOR DETAIL BEGIN/i);
+  if (detailBegin >= 0) {
+    const rest = source.slice(detailBegin);
+    const endAt = rest.search(/ADVISOR DETAIL END/i);
+    const after = endAt >= 0 ? rest.slice(endAt).replace(/^[^\n]*\n?/, "") : "";
+    source = source.slice(0, detailBegin) + after;
+  }
   const begin = source.search(/ADVISOR INPUT BEGIN/i);
   if (begin >= 0) {
     source = source.slice(begin).replace(/^[^\n]*\n?/, "");
@@ -271,5 +291,5 @@ export function parsePrefs(text: string | null | undefined): Parsed {
     if (hit >= 0) { const m = toks[hit]!; route(m[0], t.slice((m.index ?? 0) + m[0].length).trim(), t); }
     else reject(t, "not recognised");
   }
-  return { values: values as Partial<Input>, recognised, ignored, ignoredDetail, notes, provenance };
+  return { values: values as Partial<Input>, recognised, ignored, ignoredDetail, notes, provenance, detail: parsedDetail.detail, detailIgnored: parsedDetail.ignored };
 }

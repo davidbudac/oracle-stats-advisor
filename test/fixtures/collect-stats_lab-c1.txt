@@ -1,0 +1,164 @@
+
+Session altered.
+
+-- Gather advisor input for STATS_LAB.C1, collected 2026-10-11 08:14:58
+-- paste everything from BEGIN to END (the whole output is fine) into the advisor
+-- ADVISOR INPUT BEGIN
+OWNER = STATS_LAB
+TABLE_NAME = C1
+PARTITIONED = YES
+PARTITIONS = 6
+BLOCKS_PER_PARTITION = 129
+NUM_ROWS = 120500
+COLUMNS = 6
+INDEXES = 0
+LOCAL_INDEXES = 0
+HISTOGRAMS = 0
+TABLE_STATS = gathered
+TABLE_CHANGE_PERCENT = 0
+INCREMENTAL = TRUE
+INCREMENTAL_LEVEL = PARTITION
+INCREMENTAL_STALENESS = ALLOW_MIXED_FORMAT
+APPROXIMATE_NDV_ALGORITHM = REPEAT OR HYPERLOGLOG
+PUBLISH = TRUE
+ESTIMATE_PERCENT = DBMS_STATS.AUTO_SAMPLE_SIZE
+GRANULARITY = AUTO
+METHOD_OPT = FOR ALL COLUMNS SIZE AUTO
+CASCADE = DBMS_STATS.AUTO_CASCADE
+NO_INVALIDATE = DBMS_STATS.AUTO_INVALIDATE
+OPTIONS = GATHER
+DEGREE = NULL
+STALE_PERCENT = 10
+PREFERENCE_OVERRIDES_PARAMETER = FALSE
+AUTO_STAT_EXTENSIONS = OFF
+SUBPARTITIONED = 1
+SUBPARTITION_TYPE = HASH
+SUBPARTITIONS_PER_PARTITION = 4
+REALTIME_STATS = 0
+PENDING_STATS = 0
+TABLE_PREFS = INCREMENTAL
+HISTOGRAM_COLUMNS =
+-- histograms kept only for incremental statistics (NOTES HIST_FOR_INCREM_STATS, not used by the optimizer, so not pinned): (none)
+COLUMN_GROUPS = 0
+COLUMN_GROUP_LIST =
+SYNOPSES = all
+NEW_PARTITIONS = 0
+NEW_PARTITION =
+CHANGED_PARTITIONS = 0
+CHANGED_PARTITION =
+CHANGE_PERCENT = 0
+LOCKED_PARTITIONS = 0
+LOCKED_CHANGED = 0
+LOCKED_PARTITION =
+LOCKED_NO_SYNOPSIS = 0
+OLD_FORMAT_PARTITIONS = 0
+TABLE_LOCKED = 0
+COLUMN_CHANGE = none
+-- (statement 2 below may override COLUMN_CHANGE and COLUMN_USAGE from the column usage report, statement 3 SYNOPSES from the synopsis table)
+AUTO_TASK_STATUS = OFF
+AUTO_TASK_INTERVAL = 900
+AUTO_TASK_MAX_RUN_TIME = 3600
+COLUMN_USAGE = 0
+-- COLUMN_CHANGE: unchanged by the column usage report
+-- columns used in predicates without a histogram: (none)
+SYNOPSES = all
+-- from the synopsis table: 6 partition(s) with a synopsis, 0 unlocked partition(s) analysed after their synopsis
+COLUMN_GROUP_CANDIDATES = 0
+COLUMN_GROUP_CANDIDATE_LIST =
+-- column sets a SQL plan directive misestimated, without a column group: eq = equality predicates only (a group helps), range = not (it does not); the number is the product of the members' NDVs
+COLUMN_GROUP_USAGE_LIST =
+-- column sets SEED_COL_USAGE recorded without a column group (0); the paste box adds them to the candidates
+-- ADVISOR INPUT END
+-- ADVISOR DETAIL BEGIN
+DETAIL_VERSION = 1
+COLLECTED_AT = 2026-10-11 08:15:00
+DB_VERSION = 19.27.0.0.0
+OPTIMIZER_USE_PENDING_STATISTICS = FALSE
+REALTIME_STATS_PARAM = FALSE
+OPTIMIZER_ADAPTIVE_STATISTICS = FALSE
+SYSAUX_OPTSTAT_MB = 150.7
+LAST_ANALYZED = 2026-10-05 10:20:24
+MODS_TIMESTAMP = 2026-10-05 10:20:24
+ROWS_CHANGED = 0
+ROWS_TRUNCATED = N
+STALE_STATS = NO
+STATS_ON_LOAD = N
+REALTIME_STATS_NOTES = N
+SUBPARTITIONING = HASH
+SUBPARTITIONS = 24
+SUBPARTITIONS_WITH_STATS = 0
+ZERO_ROW_PARTITIONS_WITH_DML = 0
+-- PARTITIONS_OMITTED: not needed, 6 partition(s) listed below
+PENDING_ROWS = 0
+PENDING_SINCE =
+HISTORY_ROWS = 17
+HISTORY_OLDEST = 2026-10-05 10:20:20
+HISTORY_NEWEST = 2026-10-05 10:20:24
+RETENTION_DAYS = 31
+HISTORY_AVAILABLE_SINCE = 2026-09-10 05:29:21
+AUTO_TASK_STATUS = OFF
+AUTO_TASK_INTERVAL = 900
+AUTO_TASK_MAX_RUN_TIME = 3600
+AUTOSTATS_TARGET = AUTO
+TABLE_CACHED_BLOCKS = 1
+AUTOTASK_STATUS = ENABLED
+UNIQUE_COLUMNS =
+FBI_EXPRESSIONS =
+EXPRESSION_CANDIDATES =
+
+COLUMN_USAGE_COLLECTED = Y
+COLUMN = SALE_ID|NUMBER|N|120500|0|1|NONE|120500|.00000829875518672199|6|2026-10-05 10:20:24|INCREMENTAL|1|9000500||N
+COLUMN = SALE_DATE|DATE|N|167|0|1|NONE|120500|.00598802395209581|8|2026-10-05 10:20:24|INCREMENTAL|2024-01-01 00:00:00|2024-06-28 00:00:00||N
+COLUMN = PRODUCT_ID|NUMBER|N|3494|0|1|NONE|120500|.000286204922724671|4|2026-10-05 10:20:24|INCREMENTAL|1|3555||N
+COLUMN = CUSTOMER_ID|NUMBER|N|45069|0|1|NONE|120500|.0000221882003150724|5|2026-10-05 10:20:24|INCREMENTAL|1|50000||N
+COLUMN = STATUS|VARCHAR2|N|2|0|1|NONE|120500|.5|9|2026-10-05 10:20:24|INCREMENTAL|RETURNED|SHIPPED||N
+COLUMN = AMOUNT|NUMBER|N|1|0|1|NONE|120500|1|3|2026-10-05 10:20:24|INCREMENTAL|1|1||N
+HISTORY = 4259|gather_table_stats|2026-10-05 10:20:24|2026-10-05 10:20:24|COMPLETED||TABLE|1|Y|0|754|
+HISTORY = 4258|gather_table_stats|2026-10-05 10:20:22|2026-10-05 10:20:23|COMPLETED||TABLE|6|Y|0|747|
+WINDOW = SATURDAY_WINDOW|freq=daily;byday=SAT;byhour=6;byminute=0; bysecond=0|+000 20:00:00|Y|2026-10-10 06:00:00
+WINDOW = SUNDAY_WINDOW|freq=daily;byday=SUN;byhour=6;byminute=0; bysecond=0|+000 20:00:00|Y|2026-10-11 06:00:00
+WINDOW = MONDAY_WINDOW|freq=daily;byday=MON;byhour=22;byminute=0; bysecond=0|+000 04:00:00|Y|2026-10-12 22:00:00
+WINDOW = TUESDAY_WINDOW|freq=daily;byday=TUE;byhour=22;byminute=0; bysecond=0|+000 04:00:00|Y|2026-10-13 22:00:00
+WINDOW = WEDNESDAY_WINDOW|freq=daily;byday=WED;byhour=22;byminute=0; bysecond=0|+000 04:00:00|Y|2026-10-14 22:00:00
+WINDOW = THURSDAY_WINDOW|freq=daily;byday=THU;byhour=22;byminute=0; bysecond=0|+000 04:00:00|Y|2026-10-15 22:00:00
+WINDOW = FRIDAY_WINDOW|freq=daily;byday=FRI;byhour=22;byminute=0; bysecond=0|+000 04:00:00|Y|2026-10-16 22:00:00
+AUTORUN = SATURDAY_WINDOW|2026-10-10 21:19:09|SUCCEEDED|+000 00:00:04|
+AUTORUN = SATURDAY_WINDOW|2026-10-10 21:19:09|SUCCEEDED|+000 00:00:11|
+AUTORUN = SATURDAY_WINDOW|2026-10-10 21:19:09|SUCCEEDED|+000 00:00:10|
+AUTORUN = FRIDAY_WINDOW|2026-10-10 07:05:00|SUCCEEDED|+000 00:00:48|
+AUTORUN = THURSDAY_WINDOW|2026-10-09 06:34:12|SUCCEEDED|+000 00:01:34|
+AUTORUN = WEDNESDAY_WINDOW|2026-10-08 05:00:00|SUCCEEDED|+000 00:00:45|
+AUTORUN = SUNDAY_WINDOW|2026-10-04 13:00:00|SUCCEEDED|+000 00:00:09|
+HFRUN = 4706|2026-10-11 05:29:18|2026-10-11 05:29:21|COMPLETED|70|1|0|AUTO_TASK
+HFRUN = 4703|2026-10-11 01:29:07|2026-10-11 01:29:18|COMPLETED|88|1|0|AUTO_TASK
+HFRUN = 4700|2026-10-10 21:19:15|2026-10-10 21:19:25|COMPLETED|111|1|0|AUTO_TASK
+HFRUN = 4676|2026-10-10 07:05:11|2026-10-10 07:05:27|COMPLETED|85|1|0|AUTO_TASK
+HFRUN = 4630|2026-10-09 06:34:30|2026-10-09 06:35:37|COMPLETED|100|1|0|AUTO_TASK
+HFRUN = 4572|2026-10-08 05:00:02|2026-10-08 05:00:25|COMPLETED|279|1|0|AUTO_TASK
+HFRUN = 3841|2026-10-05 05:08:30|2026-10-05 05:08:36|COMPLETED|76|1|0|AUTO_TASK
+PARTITION = S_2024_01|1|20000|122|2026-10-05 10:20:23|N|N|0|HLL
+PARTITION = S_2024_02|2|20000|125|2026-10-05 10:20:23|N|N|0|HLL
+PARTITION = S_2024_03|3|20500|132|2026-10-05 10:20:24|N|N|0|HLL
+PARTITION = S_2024_04|4|20000|125|2026-10-05 10:20:23|N|N|0|HLL
+PARTITION = S_2024_05|5|20000|125|2026-10-05 10:20:23|N|N|0|HLL
+PARTITION = S_2024_06|6|20000|125|2026-10-05 10:20:23|N|N|0|HLL
+-- ADVISOR DETAIL END
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+| Operation Id | Operation                           | Target           | Start Time | End Time | Status | Total Tasks | Successful Tasks | Failed Tasks | Active Tasks                               |
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+| 4745         | gather_table_stats (reporting mode) | "STATS_LAB"."C1" |            |          |        | 1           |                  |              |                                            |
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+|                                                                                                                                                                                                     |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|                                                                                              T A S K S                                                                                              |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|    ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------    |
+|    | Target           | Type  | Start Time | End Time | Status                                                                                                                                 |    |
+|    ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------    |
+|    | "STATS_LAB"."C1" | TABLE |            |          |                                                                                                                                        |    |
+|    ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------    |
+|                                                                                                                                                                                                     |
+|                                                                                                                                                                                                     |
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
