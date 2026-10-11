@@ -1,13 +1,13 @@
 -- collect.sql: everything the gather advisor needs about one table, as pasteable KEY = VALUE lines.
 --
--- Pure SQL: four SELECT statements over the DBA_* views (the third reads one SYS table and is
+-- Pure SQL: five SELECT statements over the DBA_* views (the third reads one SYS table and is
 -- skipped without the privilege), plus one optional, error-tolerant PL/SQL block that flushes the
 -- DML counters. No DDL, no DML, nothing is gathered.
 --
 -- Run it in the PDB that owns the table, as a user who can read the DBA_* views and call
 -- DBMS_STATS. The reports need more: REPORT_GATHER_TABLE_STATS ownership or ANALYZE ANY,
--- REPORT_COL_USAGE (statement 2) SYSDBA or ANALYZE ANY DICTIONARY plus ANALYZE ANY, and statement 3
--- reads SYS.WRI$_OPTSTAT_SYNOPSIS_HEAD$ (SYSDBA). Each is skipped without the privilege;
+-- REPORT_COL_USAGE (statements 2 and 5) SYSDBA or ANALYZE ANY DICTIONARY plus ANALYZE ANY, and
+-- statement 3 reads SYS.WRI$_OPTSTAT_SYNOPSIS_HEAD$ (SYSDBA). Each is skipped without the privilege;
 -- SELECT_CATALOG_ROLE + EXECUTE alone is not sufficient for every report.
 -- Input owner/table names must be conventional unquoted identifiers.
 -- See docs/oracle19c-review.md for the review and remaining model limits.
@@ -62,6 +62,17 @@
 --                             statistics for; usage: DBMS_STATS.REPORT_COL_USAGE lists a column whose
 --                             global HISTOGRAM is NONE (statement 2); else none
 --   COLUMN_USAGE              1 when REPORT_COL_USAGE lists at least one column
+--   AUTO_STAT_EXTENSIONS      the preference in force: ON lets a SQL plan directive make the gather create a column group
+--   COLUMN_GROUPS             extensions that are column groups (DBA_STAT_EXTENSIONS, extension text starting with
+--                             a parenthesis); COLUMN_GROUP_LIST names them. An extension without statistics (created
+--                             since the last gather) also sets COLUMN_CHANGE = group
+--   COLUMN_GROUP_CANDIDATES   statement 4: column sets of two or more columns a USABLE DYNAMIC_SAMPLING directive
+--                             (DBA_SQL_PLAN_DIRECTIVES, DBA_SQL_PLAN_DIR_OBJECTS) misestimated and no column group
+--                             covers; counted when the directive's predicates were all equalities, the case a column
+--                             group serves (19c Tuning Guide, Managing Extended Statistics). COLUMN_GROUP_CANDIDATE_LIST
+--                             has every such set as columns|directive|eq or range|product of the members' NDVs
+--   COLUMN_GROUP_USAGE_LIST   statement 5: the group lines of REPORT_COL_USAGE ("(A, B) : FILTER", recorded under
+--                             SEED_COL_USAGE) without a column group; the paste box merges them into the candidates
 --
 -- Oracle 19c. Exercised 2026-10-08 on 19.27 (PDB1 of the dbmint lab: STATS_LAB.SALES, E1, C1, N4, P2 and the
 -- plain ST1); test/fixtures/collect-e1.txt is one real output. Read it before you run it elsewhere.
@@ -173,6 +184,16 @@ WITH p AS (
                          WHERE  cs.owner = c.owner AND cs.table_name = c.table_name AND cs.column_name = c.column_name
                          AND    cs.histogram IS NOT NULL AND cs.histogram <> 'NONE'
                          AND    cs.notes LIKE '%HIST_FOR_INCREM_STATS%')) AS hist_support,
+         (SELECT COUNT(*) FROM dba_stat_extensions e
+          WHERE  e.owner = tb.own AND e.table_name = tb.tab AND DBMS_LOB.SUBSTR(e.extension, 1, 1) = '(') AS n_cg,
+         (SELECT LISTAGG(REPLACE(REPLACE(DBMS_LOB.SUBSTR(e.extension, 4000, 1), '"', ''), ' ', ''), '; ' ON OVERFLOW TRUNCATE) WITHIN GROUP (ORDER BY e.extension_name)
+          FROM   dba_stat_extensions e
+          WHERE  e.owner = tb.own AND e.table_name = tb.tab AND DBMS_LOB.SUBSTR(e.extension, 1, 1) = '(') AS cg_list,
+         (SELECT COUNT(*) FROM dba_stat_extensions e
+          WHERE  e.owner = tb.own AND e.table_name = tb.tab
+          AND    NOT EXISTS (SELECT 1 FROM dba_tab_col_statistics c
+                             WHERE  c.owner = e.owner AND c.table_name = e.table_name AND c.column_name = e.extension_name
+                             AND    c.last_analyzed IS NOT NULL)) AS n_ext_nostats,
          (SELECT LISTAGG(sp.preference_name, ',') WITHIN GROUP (ORDER BY sp.preference_name)
           FROM   dba_tab_stat_prefs sp WHERE sp.owner = tb.own AND sp.table_name = tb.tab) AS tbl_prefs,
          CASE WHEN tb.last_analyzed IS NULL THEN 'none'
@@ -208,7 +229,8 @@ WITH p AS (
          DBMS_STATS.GET_PREFS('OPTIONS', tb.own, tb.tab)                        AS p_options,
          DBMS_STATS.GET_PREFS('DEGREE', tb.own, tb.tab)                         AS p_degree,
          DBMS_STATS.GET_PREFS('STALE_PERCENT', tb.own, tb.tab)                  AS p_stale_percent,
-         DBMS_STATS.GET_PREFS('PREFERENCE_OVERRIDES_PARAMETER', tb.own, tb.tab) AS p_overrides
+         DBMS_STATS.GET_PREFS('PREFERENCE_OVERRIDES_PARAMETER', tb.own, tb.tab) AS p_overrides,
+         DBMS_STATS.GET_PREFS('AUTO_STAT_EXTENSIONS', tb.own, tb.tab)           AS p_auto_ext
   FROM   tb LEFT JOIN ag ON 1 = 1
 ), w AS (
   SELECT v.*,
@@ -251,9 +273,12 @@ FROM   w,
          'DEGREE = ' || NVL(w.p_degree, 'NULL'),
          'STALE_PERCENT = ' || NVL(w.p_stale_percent, 'NULL'),
          'PREFERENCE_OVERRIDES_PARAMETER = ' || NVL(w.p_overrides, 'NULL'),
+         'AUTO_STAT_EXTENSIONS = ' || NVL(w.p_auto_ext, 'NULL'),
          'TABLE_PREFS = ' || w.tbl_prefs,
          'HISTOGRAM_COLUMNS = ' || w.hist_cols,
          '-- histograms kept only for incremental statistics (NOTES HIST_FOR_INCREM_STATS, not used by the optimizer, so not pinned): ' || NVL(w.hist_support, '(none)'),
+         'COLUMN_GROUPS = ' || TO_CHAR(w.n_cg),
+         'COLUMN_GROUP_LIST = ' || w.cg_list,
          'SYNOPSES = ' || w.synopses,
          'NEW_PARTITIONS = ' || TO_CHAR(NVL(w.n_no_stats, 0)),
          'NEW_PARTITION = ' || w.name_new,
@@ -266,7 +291,7 @@ FROM   w,
          'LOCKED_NO_SYNOPSIS = ' || TO_CHAR(NVL(w.locked_no_syn, 0)),
          'OLD_FORMAT_PARTITIONS = ' || TO_CHAR(NVL(w.n_old_fmt, 0)),
          'TABLE_LOCKED = ' || w.tbl_locked,
-         'COLUMN_CHANGE = ' || CASE WHEN w.n_groups > 0 THEN 'group' ELSE 'none' END,
+         'COLUMN_CHANGE = ' || CASE WHEN w.n_groups > 0 OR w.n_ext_nostats > 0 THEN 'group' ELSE 'none' END,
          '-- (statement 2 below may override COLUMN_CHANGE and COLUMN_USAGE from the column usage report, statement 3 SYNOPSES from the synopsis table)'
        ));
 
@@ -283,16 +308,20 @@ WITH p AS (
   FROM   r
   CONNECT BY LEVEL <= REGEXP_COUNT(r.rep, '^\s*\d+\.\s+\S+\s*:', 1, 'm')
 ), g AS (
+  -- an extension some unlocked partition lacks statistics for, or one without global statistics: COLUMN_CHANGE stays group
   SELECT COUNT(*) AS n_groups
   FROM   p, dba_stat_extensions e
   WHERE  e.owner = p.own AND e.table_name = p.tab
-  AND    EXISTS (SELECT 1 FROM dba_tab_statistics s
+  AND   (EXISTS (SELECT 1 FROM dba_tab_statistics s
                  WHERE  s.owner = e.owner AND s.table_name = e.table_name AND s.object_type = 'PARTITION'
                  AND    s.last_analyzed IS NOT NULL AND s.stattype_locked IS NULL
                  AND    NOT EXISTS (SELECT 1 FROM dba_part_col_statistics pc
                                     WHERE  pc.owner = s.owner AND pc.table_name = s.table_name
                                     AND    pc.partition_name = s.partition_name AND pc.column_name = e.extension_name
                                     AND    pc.last_analyzed IS NOT NULL))
+         OR NOT EXISTS (SELECT 1 FROM dba_tab_col_statistics c
+                        WHERE  c.owner = e.owner AND c.table_name = e.table_name AND c.column_name = e.extension_name
+                        AND    c.last_analyzed IS NOT NULL))
 ), x AS (
   SELECT COUNT(u.col) AS n_used,
          LISTAGG(CASE WHEN NVL(c.histogram, 'NONE') = 'NONE'
@@ -338,7 +367,120 @@ FROM   x,
            || TO_CHAR(NVL(x.n_behind, 0)) || ' unlocked partition(s) analysed after their synopsis'
        ));
 
--- ====================================================================== 4. end marker, detail, dry run
+-- ====================================================================== 4. column sets the optimizer asked for: SQL plan directives (DBA views only)
+-- A DYNAMIC_SAMPLING directive on two or more columns of the table records a cardinality misestimate
+-- on them together. Its TABLE row says whether the predicates were all equalities: only then does a
+-- column group help (the optimizer uses column group statistics for equality predicates, in-lists and
+-- GROUP BY). Sets already covered by an extension are left out.
+WITH p AS (
+  SELECT UPPER(TRIM(BOTH '"' FROM TRIM('&adv_owner'))) AS own,
+         UPPER(TRIM(BOTH '"' FROM TRIM('&adv_table'))) AS tab
+  FROM   dual
+), n AS (
+  SELECT LEVEL AS i FROM dual CONNECT BY LEVEL <= 32
+), ext AS (
+  SELECT e.extension_name, DBMS_LOB.SUBSTR(e.extension, 4000, 1) AS txt
+  FROM   p, dba_stat_extensions e
+  WHERE  e.owner = p.own AND e.table_name = p.tab AND DBMS_LOB.SUBSTR(e.extension, 1, 1) = '('
+), extset AS (
+  SELECT ext.extension_name,
+         LISTAGG(REGEXP_SUBSTR(ext.txt, '"([^"]+)"', 1, n.i, NULL, 1), ',')
+           WITHIN GROUP (ORDER BY REGEXP_SUBSTR(ext.txt, '"([^"]+)"', 1, n.i, NULL, 1)) AS cols
+  FROM   ext, n
+  WHERE  n.i <= REGEXP_COUNT(ext.txt, '"[^"]+"')
+  GROUP  BY ext.extension_name
+), dcols AS (
+  SELECT d.directive_id, o.subobject_name AS col, c.num_distinct
+  FROM   p, dba_sql_plan_directives d
+         JOIN dba_sql_plan_dir_objects o ON o.directive_id = d.directive_id
+         LEFT JOIN dba_tab_col_statistics c ON c.owner = o.owner AND c.table_name = o.object_name AND c.column_name = o.subobject_name
+  WHERE  o.owner = p.own AND o.object_name = p.tab AND o.object_type = 'COLUMN'
+  AND    d.type = 'DYNAMIC_SAMPLING' AND d.state = 'USABLE'
+), dsets AS (
+  SELECT dc.directive_id,
+         LISTAGG(dc.col, ',') WITHIN GROUP (ORDER BY dc.col) AS cols,
+         COUNT(*) AS n_cols,
+         ROUND(EXP(SUM(LN(GREATEST(NVL(dc.num_distinct, 1), 1))))) AS ndv_product,
+         (SELECT MAX(CASE WHEN EXTRACTVALUE(o.notes, '/obj_note/equality_predicates_only') = 'NO' THEN 'range' ELSE 'eq' END)
+          FROM   p, dba_sql_plan_dir_objects o
+          WHERE  o.directive_id = dc.directive_id AND o.owner = p.own AND o.object_name = p.tab AND o.object_type = 'TABLE') AS kind
+  FROM   dcols dc
+  GROUP  BY dc.directive_id
+), cand AS (
+  SELECT ds.cols, MIN(NVL(ds.kind, 'eq')) AS kind, MIN(ds.ndv_product) AS ndv_product
+  FROM   dsets ds
+  WHERE  ds.n_cols >= 2 AND NOT EXISTS (SELECT 1 FROM extset x WHERE x.cols = ds.cols)
+  GROUP  BY ds.cols
+), x AS (
+  SELECT SUM(CASE WHEN kind = 'eq' THEN 1 ELSE 0 END) AS n_eq,
+         LISTAGG(cols || '|directive|' || kind || '|' || TO_CHAR(ndv_product), '; ' ON OVERFLOW TRUNCATE) WITHIN GROUP (ORDER BY kind, cols) AS list
+  FROM   cand
+)
+SELECT column_value AS line
+FROM   x,
+       TABLE(sys.odcivarchar2list(
+         'COLUMN_GROUP_CANDIDATES = ' || TO_CHAR(NVL(x.n_eq, 0)),
+         'COLUMN_GROUP_CANDIDATE_LIST = ' || x.list,
+         '-- column sets a SQL plan directive misestimated, without a column group: eq = equality predicates only (a group helps), range = not (it does not); the number is the product of the members'' NDVs'
+       ));
+
+-- ====================================================================== 5. column sets SEED_COL_USAGE recorded (REPORT_COL_USAGE; skipped on error)
+-- REPORT_COL_USAGE lists a group line "(A, B) : FILTER" for columns filtered together while
+-- DBMS_STATS.SEED_COL_USAGE was monitoring. Sets already covered by an extension are left out.
+WITH p AS (
+  SELECT UPPER(TRIM(BOTH '"' FROM TRIM('&adv_owner'))) AS own,
+         UPPER(TRIM(BOTH '"' FROM TRIM('&adv_table'))) AS tab
+  FROM   dual
+), n AS (
+  SELECT LEVEL AS i FROM dual CONNECT BY LEVEL <= 32
+), ext AS (
+  SELECT e.extension_name, DBMS_LOB.SUBSTR(e.extension, 4000, 1) AS txt
+  FROM   p, dba_stat_extensions e
+  WHERE  e.owner = p.own AND e.table_name = p.tab AND DBMS_LOB.SUBSTR(e.extension, 1, 1) = '('
+), extset AS (
+  SELECT ext.extension_name,
+         LISTAGG(REGEXP_SUBSTR(ext.txt, '"([^"]+)"', 1, n.i, NULL, 1), ',')
+           WITHIN GROUP (ORDER BY REGEXP_SUBSTR(ext.txt, '"([^"]+)"', 1, n.i, NULL, 1)) AS cols
+  FROM   ext, n
+  WHERE  n.i <= REGEXP_COUNT(ext.txt, '"[^"]+"')
+  GROUP  BY ext.extension_name
+), r AS (
+  SELECT p.own, p.tab, DBMS_STATS.REPORT_COL_USAGE(p.own, p.tab) AS rep FROM p
+), g AS (
+  SELECT LEVEL AS gi,
+         REGEXP_REPLACE(DBMS_LOB.SUBSTR(REGEXP_SUBSTR(r.rep, '^\s*\d+\.\s+\(([^)]*)\)', 1, LEVEL, 'm', 1), 4000, 1), '\s', '') AS txt
+  FROM   r
+  CONNECT BY LEVEL <= REGEXP_COUNT(r.rep, '^\s*\d+\.\s+\(', 1, 'm')
+), gcols AS (
+  SELECT g.gi, REGEXP_SUBSTR(g.txt, '[^,]+', 1, n.i) AS col
+  FROM   g, n
+  WHERE  n.i <= REGEXP_COUNT(g.txt, '[^,]+')
+), gsets AS (
+  SELECT gc.gi,
+         LISTAGG(gc.col, ',') WITHIN GROUP (ORDER BY gc.col) AS cols,
+         ROUND(EXP(SUM(LN(GREATEST(NVL(c.num_distinct, 1), 1))))) AS ndv_product
+  FROM   gcols gc
+         CROSS JOIN p
+         LEFT JOIN dba_tab_col_statistics c ON c.owner = p.own AND c.table_name = p.tab AND c.column_name = gc.col
+  GROUP  BY gc.gi
+), cand AS (
+  SELECT gs.cols, MIN(gs.ndv_product) AS ndv_product
+  FROM   gsets gs
+  WHERE  NOT EXISTS (SELECT 1 FROM extset x WHERE x.cols = gs.cols)
+  GROUP  BY gs.cols
+), x AS (
+  SELECT COUNT(*) AS n_usage,
+         LISTAGG(cols || '|usage|eq|' || TO_CHAR(ndv_product), '; ' ON OVERFLOW TRUNCATE) WITHIN GROUP (ORDER BY cols) AS list
+  FROM   cand
+)
+SELECT column_value AS line
+FROM   x,
+       TABLE(sys.odcivarchar2list(
+         'COLUMN_GROUP_USAGE_LIST = ' || x.list,
+         '-- column sets SEED_COL_USAGE recorded without a column group (' || TO_CHAR(x.n_usage) || '); the paste box adds them to the candidates'
+       ));
+
+-- ====================================================================== 6. end marker, detail, dry run
 SELECT '-- ADVISOR INPUT END' AS line FROM dual;
 
 -- Partitions that matter: new, changed, locked, without a synopsis or with an old-format one (not parsed)

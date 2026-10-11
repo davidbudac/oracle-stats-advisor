@@ -1,8 +1,10 @@
 -- recommend.sql: the DBMS_STATS preferences in force for one table, next to what the gather advisor
 -- would set them to, and the statements that get there.
 --
--- Pure SQL: one SELECT over the DBA_* views (plus one optional, error-tolerant block that flushes
--- the DML counters, and one optional statement that needs REPORT_COL_USAGE). No DDL, no DML,
+-- Pure SQL: SELECTs over the DBA_* views (plus one optional, error-tolerant block that flushes
+-- the DML counters, and two optional statements that need REPORT_COL_USAGE). Statement 3 prints
+-- the column groups the table has and the CREATE_EXTENDED_STATS calls for the column sets a SQL
+-- plan directive misestimated; statement 4 adds the sets SEED_COL_USAGE recorded. No DDL, no DML,
 -- nothing is gathered, no preference is changed: the statements are printed, not run.
 --
 -- Run it in the PDB that owns the table, as a user who can read the DBA_* views and call
@@ -392,6 +394,147 @@ FROM   x,
            '--   pinned list template: FOR ALL COLUMNS SIZE 1 FOR COLUMNS SIZE 254 ' || TRIM(',' FROM NVL(x.with_hist, '') || ',' || NVL(x.candidates, '')) END
        ))
 WHERE  column_value IS NOT NULL;
+
+-- ====================================================================== 3. column groups (extended statistics): DBA views only
+-- The groups the table has, and the column sets a USABLE DYNAMIC_SAMPLING SQL plan directive misestimated
+-- that no group covers. A group helps only when the directive's predicates were all equalities (the
+-- optimizer uses column group statistics for equality predicates, in-lists and GROUP BY). On an incremental
+-- table a new group rereads every unlocked partition at the next gather (lab E4), and a locked partition
+-- can never get its synopsis (lab Tc).
+WITH p AS (
+  SELECT UPPER(TRIM(BOTH '"' FROM TRIM('&adv_owner'))) AS own,
+         UPPER(TRIM(BOTH '"' FROM TRIM('&adv_table'))) AS tab
+  FROM   dual
+), n AS (
+  SELECT LEVEL AS i FROM dual CONNECT BY LEVEL <= 32
+), ext AS (
+  SELECT e.extension_name, DBMS_LOB.SUBSTR(e.extension, 4000, 1) AS txt,
+         (SELECT c.last_analyzed FROM dba_tab_col_statistics c
+          WHERE  c.owner = e.owner AND c.table_name = e.table_name AND c.column_name = e.extension_name) AS analyzed
+  FROM   p, dba_stat_extensions e
+  WHERE  e.owner = p.own AND e.table_name = p.tab AND DBMS_LOB.SUBSTR(e.extension, 1, 1) = '('
+), extset AS (
+  SELECT ext.extension_name, ext.txt, ext.analyzed,
+         LISTAGG(REGEXP_SUBSTR(ext.txt, '"([^"]+)"', 1, n.i, NULL, 1), ',')
+           WITHIN GROUP (ORDER BY REGEXP_SUBSTR(ext.txt, '"([^"]+)"', 1, n.i, NULL, 1)) AS cols
+  FROM   ext, n
+  WHERE  n.i <= REGEXP_COUNT(ext.txt, '"[^"]+"')
+  GROUP  BY ext.extension_name, ext.txt, ext.analyzed
+), dcols AS (
+  SELECT d.directive_id, o.subobject_name AS col, c.num_distinct
+  FROM   p, dba_sql_plan_directives d
+         JOIN dba_sql_plan_dir_objects o ON o.directive_id = d.directive_id
+         LEFT JOIN dba_tab_col_statistics c ON c.owner = o.owner AND c.table_name = o.object_name AND c.column_name = o.subobject_name
+  WHERE  o.owner = p.own AND o.object_name = p.tab AND o.object_type = 'COLUMN'
+  AND    d.type = 'DYNAMIC_SAMPLING' AND d.state = 'USABLE'
+), dsets AS (
+  SELECT dc.directive_id,
+         LISTAGG(dc.col, ',') WITHIN GROUP (ORDER BY dc.col) AS cols,
+         LISTAGG(dc.col, ', ') WITHIN GROUP (ORDER BY dc.col) AS pretty,
+         COUNT(*) AS n_cols,
+         ROUND(EXP(SUM(LN(GREATEST(NVL(dc.num_distinct, 1), 1))))) AS ndv_product,
+         (SELECT MAX(CASE WHEN EXTRACTVALUE(o.notes, '/obj_note/equality_predicates_only') = 'NO' THEN 'range' ELSE 'eq' END)
+          FROM   p, dba_sql_plan_dir_objects o
+          WHERE  o.directive_id = dc.directive_id AND o.owner = p.own AND o.object_name = p.tab AND o.object_type = 'TABLE') AS kind
+  FROM   dcols dc
+  GROUP  BY dc.directive_id
+), cand AS (
+  SELECT ds.cols, MIN(ds.pretty) AS pretty, MIN(NVL(ds.kind, 'eq')) AS kind, MIN(ds.ndv_product) AS ndv_product
+  FROM   dsets ds
+  WHERE  ds.n_cols >= 2 AND NOT EXISTS (SELECT 1 FROM extset x WHERE x.cols = ds.cols)
+  GROUP  BY ds.cols
+), tb AS (
+  SELECT p.own, p.tab, NVL(s.num_rows, 0) AS num_rows,
+         (SELECT COUNT(*) FROM dba_tab_cols c WHERE c.owner = p.own AND c.table_name = p.tab AND c.hidden_column = 'NO') AS n_cols,
+         (SELECT COUNT(*) FROM extset) AS n_ext,
+         (SELECT COUNT(*) FROM cand WHERE kind = 'eq') AS n_cand,
+         DBMS_STATS.GET_PREFS('AUTO_STAT_EXTENSIONS', p.own, p.tab) AS auto_ext
+  FROM   p LEFT JOIN dba_tab_statistics s ON s.owner = p.own AND s.table_name = p.tab AND s.object_type = 'TABLE'
+)
+SELECT line
+FROM  (SELECT 1 AS grp, 0 AS ord, '--   column groups: ' || TO_CHAR(tb.n_ext) || CASE WHEN tb.n_ext = 0 THEN ' (none)' END
+              || '; AUTO_STAT_EXTENSIONS = ' || NVL(tb.auto_ext, 'NULL')
+              || CASE WHEN tb.auto_ext = 'ON' THEN ' (a directive makes the next gather create a group by itself; OFF leaves the moment to you)' END AS line
+       FROM   tb
+       UNION ALL
+       SELECT 2, ROWNUM, '--   has ' || x.txt || CASE WHEN x.analyzed IS NULL THEN ': no statistics yet, the next gather computes them' ELSE ', statistics of ' || TO_CHAR(x.analyzed, 'YYYY-MM-DD') END
+       FROM   extset x
+       UNION ALL
+       SELECT 3, ROWNUM, CASE WHEN c.kind = 'eq'
+                   THEN 'SELECT DBMS_STATS.CREATE_EXTENDED_STATS(''' || tb.own || ''', ''' || tb.tab || ''', ''(' || c.pretty || ')'') FROM dual;'
+                        || '   -- a SQL plan directive misestimated these columns together (equality predicates); NDV product ' || TO_CHAR(c.ndv_product)
+                        || CASE WHEN c.ndv_product > tb.num_rows THEN ', more than the ' || TO_CHAR(tb.num_rows) || ' rows' END
+                   ELSE '--   (' || c.pretty || '): a SQL plan directive, but not with equality predicates only; a column group would not be used for those queries' END
+       FROM   cand c, tb
+       UNION ALL
+       SELECT 4, 0, '--   the groups get statistics at the next gather; undo with DBMS_STATS.DROP_EXTENDED_STATS(owner, table, ''(columns)'')'
+       FROM   tb WHERE tb.n_cand > 0
+       UNION ALL
+       SELECT 5, 0, '--   limit: at most ' || TO_CHAR(GREATEST(20, FLOOR(tb.n_cols / 10))) || ' extensions on this table (the greater of 20 and 10% of its columns); '
+              || TO_CHAR(tb.n_ext) || ' exist, ' || TO_CHAR(tb.n_cand) || ' proposed'
+       FROM   tb WHERE tb.n_ext + tb.n_cand > GREATEST(20, FLOOR(tb.n_cols / 10))
+       UNION ALL
+       SELECT 6, 0, '--   statement 4 below adds the groups SEED_COL_USAGE recorded, when REPORT_COL_USAGE is allowed'
+       FROM   tb)
+ORDER  BY grp, ord;
+
+-- ====================================================================== 4. column groups SEED_COL_USAGE recorded (REPORT_COL_USAGE; skipped on error)
+-- The group lines of REPORT_COL_USAGE, "(A, B) : FILTER", minus the sets a group or a directive above already covers.
+WITH p AS (
+  SELECT UPPER(TRIM(BOTH '"' FROM TRIM('&adv_owner'))) AS own,
+         UPPER(TRIM(BOTH '"' FROM TRIM('&adv_table'))) AS tab
+  FROM   dual
+), n AS (
+  SELECT LEVEL AS i FROM dual CONNECT BY LEVEL <= 32
+), ext AS (
+  SELECT e.extension_name, DBMS_LOB.SUBSTR(e.extension, 4000, 1) AS txt
+  FROM   p, dba_stat_extensions e
+  WHERE  e.owner = p.own AND e.table_name = p.tab AND DBMS_LOB.SUBSTR(e.extension, 1, 1) = '('
+), extset AS (
+  SELECT ext.extension_name,
+         LISTAGG(REGEXP_SUBSTR(ext.txt, '"([^"]+)"', 1, n.i, NULL, 1), ',')
+           WITHIN GROUP (ORDER BY REGEXP_SUBSTR(ext.txt, '"([^"]+)"', 1, n.i, NULL, 1)) AS cols
+  FROM   ext, n
+  WHERE  n.i <= REGEXP_COUNT(ext.txt, '"[^"]+"')
+  GROUP  BY ext.extension_name
+), dsets AS (
+  SELECT d.directive_id, LISTAGG(o.subobject_name, ',') WITHIN GROUP (ORDER BY o.subobject_name) AS cols
+  FROM   p, dba_sql_plan_directives d
+         JOIN dba_sql_plan_dir_objects o ON o.directive_id = d.directive_id
+  WHERE  o.owner = p.own AND o.object_name = p.tab AND o.object_type = 'COLUMN'
+  AND    d.type = 'DYNAMIC_SAMPLING' AND d.state = 'USABLE'
+  GROUP  BY d.directive_id
+), r AS (
+  SELECT p.own, p.tab, DBMS_STATS.REPORT_COL_USAGE(p.own, p.tab) AS rep FROM p
+), g AS (
+  SELECT LEVEL AS gi,
+         REGEXP_REPLACE(DBMS_LOB.SUBSTR(REGEXP_SUBSTR(r.rep, '^\s*\d+\.\s+\(([^)]*)\)', 1, LEVEL, 'm', 1), 4000, 1), '\s', '') AS txt
+  FROM   r
+  CONNECT BY LEVEL <= REGEXP_COUNT(r.rep, '^\s*\d+\.\s+\(', 1, 'm')
+), gcols AS (
+  SELECT g.gi, REGEXP_SUBSTR(g.txt, '[^,]+', 1, n.i) AS col
+  FROM   g, n
+  WHERE  n.i <= REGEXP_COUNT(g.txt, '[^,]+')
+), gsets AS (
+  SELECT gc.gi,
+         LISTAGG(gc.col, ',') WITHIN GROUP (ORDER BY gc.col) AS cols,
+         LISTAGG(gc.col, ', ') WITHIN GROUP (ORDER BY gc.col) AS pretty,
+         ROUND(EXP(SUM(LN(GREATEST(NVL(c.num_distinct, 1), 1))))) AS ndv_product
+  FROM   gcols gc
+         CROSS JOIN p
+         LEFT JOIN dba_tab_col_statistics c ON c.owner = p.own AND c.table_name = p.tab AND c.column_name = gc.col
+  GROUP  BY gc.gi
+), cand AS (
+  SELECT gs.cols, MIN(gs.pretty) AS pretty, MIN(gs.ndv_product) AS ndv_product
+  FROM   gsets gs
+  WHERE  NOT EXISTS (SELECT 1 FROM extset x WHERE x.cols = gs.cols)
+  AND    NOT EXISTS (SELECT 1 FROM dsets d WHERE d.cols = gs.cols)
+  GROUP  BY gs.cols
+)
+SELECT 'SELECT DBMS_STATS.CREATE_EXTENDED_STATS(''' || p.own || ''', ''' || p.tab || ''', ''(' || c.pretty || ')'') FROM dual;'
+       || '   -- SEED_COL_USAGE recorded these columns filtered together; NDV product ' || TO_CHAR(c.ndv_product) AS line
+FROM   cand c, p
+ORDER  BY c.cols;
 
 UNDEFINE adv_owner
 UNDEFINE adv_table

@@ -36,8 +36,9 @@ user who can read the `DBA_*` views and call `DBMS_STATS` (SQL*Plus, SQLcl or SQ
 SQL> @collect.sql SHOP SALES
 ```
 
-It is pure SQL: four `SELECT`s over the dictionary (the third reads one SYS table to tell whether
-the synopses are in step, and is skipped without the privilege), plus one optional, error-tolerant
+It is pure SQL: five `SELECT`s over the dictionary (the third reads one SYS table to tell whether
+the synopses are in step, and is skipped without the privilege; the fourth reads the SQL plan
+directives on the table, the fifth the column-group usage report), plus one optional, error-tolerant
 block that flushes the DML counters. Paste the whole output into "Fill the form from your database":
 every field is filled, including the owner, table and partition names used in the generated
 statements. Only the lines between `ADVISOR INPUT BEGIN` and `END` are read; an `ORA-` error in
@@ -79,6 +80,13 @@ SQL> @recommend.sql SHOP SALES
   list, SIZE 1), `GATHER AUTO` after a direct-path load, a staging table's table-level synopsis.
 - **The automatic job**: whether the table is stale by STALE_PERCENT, which partitions it
   gathers, and when it leaves the global statistics behind.
+- **Column groups (extended statistics)**: the groups the table has, the column sets the workload
+  filters together that have no group yet (a SQL plan directive with equality predicates in
+  `DBA_SQL_PLAN_DIRECTIVES`, or a group `SEED_COL_USAGE` recorded in `REPORT_COL_USAGE`), the
+  product of the members' NDVs the optimizer assumes without the group, the `CREATE_EXTENDED_STATS`
+  calls, what creating a group costs on an incremental table (one reread, a permanent full scan with
+  locked partitions), a directive whose predicates are not all equalities (a group would not be
+  used), `AUTO_STAT_EXTENSIONS`, and the extension limit.
 - **For every gather**: where each setting came from (call, preference, default, ignored by
   the override), the index work under CASCADE, where the result is written (dictionary or
   pending) and how cursors learn about it (rolling, at once, never).

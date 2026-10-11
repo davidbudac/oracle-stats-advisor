@@ -29,12 +29,14 @@ export const OPTIONS = {
   synopses: ["all", "none", "stale"],
   tableStats: ["gathered", "none", "load"],
   columnChange: ["none", "usage", "group", "histogram"],
+  autoStatExtensions: ["OFF", "ON"],
 } as const;
 export type OptionKey = keyof typeof OPTIONS;
 
 export const NUMBERS = [
   "partitions", "blocksPerPartition", "numRows", "columnCount", "indexCount", "localIndexCount",
   "stalePercent", "changePercent", "tableChangePercent", "newPartitions", "changedPartitions", "lockedPartitions", "lockedChanged", "oldFormatPartitions",
+  "columnGroups", "columnGroupCandidates",
 ] as const;
 export type NumberKey = (typeof NUMBERS)[number];
 
@@ -68,6 +70,10 @@ export interface Input {
   localIndexCount: number;
   histogramsPresent: boolean;
   columnUsageRecorded: boolean;
+  /** Column groups (extended statistics) the table has today. */
+  columnGroups: number;
+  /** Column sets with no group yet that a group would help: a SQL plan directive with equality predicates only, or a group SEED_COL_USAGE recorded. */
+  columnGroupCandidates: number;
   // preferences in force
   incremental: "TRUE" | "FALSE";
   incrementalLevel: "PARTITION" | "TABLE";
@@ -85,6 +91,7 @@ export interface Input {
   degree: string;
   stalePercent: number;
   overrides: "TRUE" | "FALSE";
+  autoStatExtensions: "OFF" | "ON";
   // the call
   runBy: "call" | "auto";
   partname: "none" | "new" | "changed";
@@ -128,6 +135,8 @@ export const DEFAULTS: Readonly<Input> = Object.freeze({
   localIndexCount: 1,
   histogramsPresent: true,
   columnUsageRecorded: true,
+  columnGroups: 0,
+  columnGroupCandidates: 0,
   incremental: "FALSE",
   incrementalLevel: "PARTITION",
   useStalePercent: false,
@@ -144,6 +153,7 @@ export const DEFAULTS: Readonly<Input> = Object.freeze({
   degree: "NULL",
   stalePercent: 10,
   overrides: "FALSE",
+  autoStatExtensions: "OFF",
   runBy: "call",
   partname: "none",
   callGranularity: "none",
@@ -181,6 +191,7 @@ export const RECOMMENDED: Readonly<Partial<Input>> = Object.freeze({
   allowMixedFormat: true,
   methodOpt: "pinned",
   overrides: "TRUE",
+  autoStatExtensions: "OFF",
   synopses: "all",
 });
 
@@ -200,6 +211,7 @@ export const PREF_DEFAULTS = {
   INCREMENTAL_STALENESS: "ALLOW_MIXED_FORMAT",
   APPROXIMATE_NDV_ALGORITHM: "REPEAT OR HYPERLOGLOG",
   PREFERENCE_OVERRIDES_PARAMETER: "FALSE",
+  AUTO_STAT_EXTENSIONS: "OFF",
 } as const;
 
 export const METHOD_OPT_TEXT: Record<MethodOpt, string> = {
@@ -214,6 +226,7 @@ export const FIELD_LABELS: Record<keyof Input, string> = {
   owner: "Owner", tableName: "Table", newPartitionName: "New partition name", changedPartitionName: "Changed partition name", lockedPartitionName: "Locked partition name",
   partitioned: "Partitioned", partitions: "Partitions", blocksPerPartition: "Blocks per partition", numRows: "Rows", columnCount: "Columns",
   indexCount: "Indexes", localIndexCount: "Local indexes", histogramsPresent: "Histograms exist today", columnUsageRecorded: "Column usage recorded",
+  columnGroups: "Column groups", columnGroupCandidates: "Column group candidates", autoStatExtensions: "AUTO_STAT_EXTENSIONS",
   incremental: "INCREMENTAL", incrementalLevel: "INCREMENTAL_LEVEL", useStalePercent: "USE_STALE_PERCENT", useLockedStats: "USE_LOCKED_STATS",
   allowMixedFormat: "ALLOW_MIXED_FORMAT", ndvAlgorithm: "APPROXIMATE_NDV_ALGORITHM", publish: "PUBLISH", estimatePercent: "ESTIMATE_PERCENT", granularity: "GRANULARITY", methodOpt: "METHOD_OPT",
   cascade: "CASCADE", noInvalidate: "NO_INVALIDATE", options: "OPTIONS", degree: "DEGREE", stalePercent: "STALE_PERCENT", overrides: "PREFERENCE_OVERRIDES_PARAMETER",
@@ -236,5 +249,6 @@ export const PRESETS: readonly Preset[] = [
   { id: "autojob", label: "Left to the automatic job", blurb: "The nightly job finds the new month on an incremental table.", values: { incremental: "TRUE", synopses: "all", runBy: "auto" } },
   { id: "newcolumn", label: "A new predicate under SIZE AUTO", blurb: "A report filters on a column for the first time; METHOD_OPT is the default.", values: { incremental: "TRUE", synopses: "all", newPartitions: 0, columnChange: "usage" } },
   { id: "staged", label: "Build synopses one partition per night", blurb: "partname + granularity PARTITION on a table without synopses (example 5).", values: { incremental: "TRUE", synopses: "none", partname: "new", callGranularity: "PARTITION" } },
+  { id: "colgroup", label: "A column group the optimizer asked for", blurb: "A plain table with a SQL plan directive on two correlated columns (equality predicates) and no column group yet.", values: { partitioned: false, blocksPerPartition: 1200, numRows: 200000, columnCount: 7, indexCount: 0, localIndexCount: 0, newPartitions: 0, columnGroupCandidates: 1 } },
   { id: "onload", label: "After a direct-path load", blurb: "A plain table with STATS_ON_LOAD statistics and OPTIONS GATHER AUTO: histograms and indexes only.", values: { partitioned: false, blocksPerPartition: 18000, numRows: 1000000, columnCount: 9, indexCount: 2, localIndexCount: 0, newPartitions: 0, tableStats: "load", callOptions: "GATHER AUTO" } },
 ];

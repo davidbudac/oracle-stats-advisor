@@ -120,6 +120,24 @@ output. The reference and Tuning Guide pages were read in full. Corrected:
    explains the merge when it has it, and flags ADAPTIVE SAMPLING. Documentation-based only: the lab
    has no old-format synopses.
 
+9. **Column groups.** New: the collector reports the column groups the table has (`COLUMN_GROUPS`,
+   `COLUMN_GROUP_LIST`), the column sets a USABLE `DYNAMIC_SAMPLING` directive misestimated that no
+   group covers (`COLUMN_GROUP_CANDIDATES`, from `DBA_SQL_PLAN_DIRECTIVES` and `DBA_SQL_PLAN_DIR_OBJECTS`,
+   whose `NOTES` is XMLTYPE on 19c: `equality_predicates_only` decides whether a group helps), the
+   group lines of `REPORT_COL_USAGE` (`COLUMN_GROUP_USAGE_LIST`), and `AUTO_STAT_EXTENSIONS`. An
+   extension without statistics now sets `COLUMN_CHANGE = group` on plain tables too, and statement 2
+   no longer overrides it with `usage`. The advisor proposes `CREATE_EXTENDED_STATS` (a function, so
+   as `SELECT ... FROM dual`), prices the group on an incremental table from lab E4 and Tc, explains
+   a range-only directive, flags `AUTO_STAT_EXTENSIONS ON` on an incremental table, and checks the
+   extension limit. Verified against the 19c Tuning Guide (Managing Extended Statistics: "The optimizer
+   uses column group statistics for equality predicates, inlist predicates, and for estimating the
+   GROUP BY cardinality"; `AUTO_STAT_EXTENSIONS` ON lets a directive trigger the creation) and the
+   DBMS_STATS reference (the limit "a maximum of (20, 10% of number of non-virtual columns)", groups of
+   2 to 32 columns, ORA-20007 and ORA-20008). Exercised on 19.27 (lab CG1, `docs/lab-observations.md`):
+   with `OPTIMIZER_ADAPTIVE_STATISTICS` FALSE the lab queries created no directive; with it TRUE for
+   the session one appeared after the flush. The directive stayed USABLE after the group was created
+   and gathered; the collector drops the set because the extension covers it.
+
 Confirmed as written: GATHER AUTO "is only applicable to tables that do not have INCREMENTAL
 enabled" and builds frequency histograms from a sample; the `'NULL'` versus `NULL` staleness
 semantics; the APPROX_GLOBAL AND PARTITION aggregation text; online statistics keep the basic

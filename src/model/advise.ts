@@ -11,12 +11,14 @@ import { DEFAULTS, METHOD_OPT_TEXT, PREF_DEFAULTS, type Granularity, type Input,
 import { clampInput } from "./clamp";
 import { fmt, pct, plural } from "./format";
 import type { AutoPlan, Cells, ColumnPlan, Effective, Finding, IndexPlan, Level, Outcome, Read, Resolved, ScanPlan, Step, WritePlan } from "./types";
+import type { Provenance } from "./setup";
 
 const isTrue = (v: unknown): boolean => v === true || String(v).toUpperCase() === "TRUE";
 const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 const RANK: Record<Level, number> = { good: 0, warn: 1, bad: 2, info: -1 };
 
-export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undefined, withNext = true): Outcome {
+/** `prov` is what the last paste said beyond the form (column group names and candidates); without it the texts count and the statements carry placeholders. */
+export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undefined, withNext = true, prov: Provenance | null = null): Outcome {
   const { input: p, notes: clampNotes } = clampInput(raw);
   const flat = !p.partitioned;
   const N = p.partitions, B = p.blocksPerPartition, T = N * B;
@@ -187,6 +189,61 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
   };
   let gathered = true; // whether the table statistics are written at all (false: ORA-20005, skipped by the job, nothing to do)
   let basicKept = false; // GATHER AUTO after a load: the basic statistics stay as they are
+
+  // Column groups (extended statistics): what the table has, what the optimizer asked for and has not got,
+  // and what creating one costs on this table. Documentation-based (19c Tuning Guide, Managing Extended
+  // Statistics: the optimizer uses column group statistics for equality predicates, in-lists and GROUP BY;
+  // AUTO_STAT_EXTENSIONS ON lets a SQL plan directive create them at the next gather) plus lab E4, E4b, Tc
+  // for the partition reread. The candidates come from DBA_SQL_PLAN_DIRECTIVES and REPORT_COL_USAGE
+  // (collect.sql statement 4); the form carries their count, the paste their names.
+  const groupAdvice = () => {
+    const CG = p.columnGroups, CAND = p.columnGroupCandidates;
+    const cands = prov?.columnGroupCandidates ?? [];
+    const useful = cands.filter((c) => c.equality), rangeOnly = cands.filter((c) => !c.equality);
+    const have = prov?.columnGroups ?? [];
+    const autoExt = p.autoStatExtensions === "ON";
+    const docs = "19c Tuning Guide, Managing Extended Statistics; 19c DBMS_STATS reference, CREATE_EXTENDED_STATS";
+    const grp = (cols: string[]) => `(${cols.join(", ")})`;
+    const incPart = !flat && isInc;
+    if (CG > 0) {
+      add("info", `The table has ${plural(CG, "column group")}${have.length ? ` ${have.map(grp).join(", ")}` : ""}. Every gather refreshes ${CG === 1 ? "its" : "their"} statistics with the ordinary columns${incPart ? ", and each partition's synopsis covers the group" : ""}; nothing extra is read for ${CG === 1 ? "it" : "them"}.`, `${docs}; lab E4b`);
+    }
+    if (CAND > 0) {
+      const named = useful.length > 0;
+      const one = CAND === 1;
+      const fromDirective = !named || useful.some((c) => c.sources.includes("directive"));
+      const fromUsage = useful.some((c) => c.sources.includes("usage"));
+      const ndvNote = useful.filter((c) => c.ndvProduct !== null).slice(0, 2).map((c) => {
+        const n = c.ndvProduct as number;
+        return `for ${grp(c.columns)} that is ${fmt(n)} distinct combinations, ${n > p.numRows ? `more than the table's ${fmt(p.numRows)} rows` : `fewer only if the columns are correlated`}`;
+      });
+      const why = [
+        fromDirective ? "A SQL plan directive records a cardinality misestimate on the columns together, with equality predicates" : "",
+        fromUsage ? "SEED_COL_USAGE recorded the columns filtered together" : "",
+      ].filter(Boolean).join("; ");
+      add("warn", `${one ? "A column set" : `${fmt(CAND)} column sets`} the workload filters together ${one ? "has" : "have"} no column group${named ? `: ${useful.map((c) => grp(c.columns)).join(", ")}` : ""}. ${why}. Without the group the optimizer multiplies the single-column selectivities as if the columns were independent${ndvNote.length ? ` (${ndvNote.join("; ")})` : ""}; the group's own NDV replaces that product.${fromDirective ? ` Until then a query on them is dynamically sampled at each hard parse when OPTIMIZER_ADAPTIVE_STATISTICS is TRUE, or misestimated when it is FALSE, the 19c default.` : ""}`, `${docs}; DBA_SQL_PLAN_DIRECTIVES`);
+      if (autoExt && fromDirective) add("info", "AUTO_STAT_EXTENSIONS is ON, so the next gather creates the directive's column group by itself. Creating it now, by hand, only decides the moment.", docs);
+      const targets = named ? useful.map((c) => grp(c.columns)) : ["(<column>, <column>)"];
+      for (const t of targets) fixAt(6, `SELECT DBMS_STATS.CREATE_EXTENDED_STATS(${OT}, '${t}') FROM dual;`);
+      fixAt(6, `-- the group gets its statistics at the next gather; undo with EXEC DBMS_STATS.DROP_EXTENDED_STATS(${OT}, '${targets[0]}')`);
+      if (fromUsage && !named) fixAt(6, `-- or create every group SEED_COL_USAGE recorded: SELECT DBMS_STATS.CREATE_EXTENDED_STATS(${OT}) FROM dual;`);
+      if (incPart) {
+        add(LCK > 0 ? "bad" : "info", `Creating ${one ? "it" : "them"} costs one reread of every unlocked partition at the next gather, for the group's statistics and synopsis in each partition; after that nothing.${LCK > 0 ? ` The ${plural(LCK, "locked partition")} cannot get ${one ? "its" : "their"} synopsis, so from that gather on the global statistics come from a full scan of the table on every gather until ${LCK === 1 ? "it is" : "they are"} unlocked: create the group, unlock, gather, lock again.` : ""}`, LCK > 0 ? "lab E4, Tc" : "lab E4, E4b");
+        if (LCK > 0) { fixAt(6, `EXEC DBMS_STATS.UNLOCK_PARTITION_STATS(${OT}, ${lockedName})`); fixAt(6, "-- gather with the new group, then lock the partition again"); }
+      }
+    }
+    if (rangeOnly.length) {
+      add("info", `A SQL plan directive also covers ${rangeOnly.map((c) => grp(c.columns)).join(", ")}, but its predicates are not all equalities. Column group statistics serve equality and IN-list predicates and GROUP BY, so a group would not help those queries; a histogram on the range column or dynamic sampling does.`, `${docs}; DBA_SQL_PLAN_DIR_OBJECTS notes`);
+    }
+    const maxExt = Math.max(20, Math.floor(p.columnCount / 10));
+    if (CG + CAND > maxExt) add("warn", `The table can have at most ${fmt(maxExt)} extensions (the greater of 20 and 10% of its columns); ${fmt(CG)} exist and ${fmt(CAND)} are proposed. CREATE_EXTENDED_STATS raises ORA-20008 beyond the limit, so drop the groups no query uses first.`, "19c DBMS_STATS reference, CREATE_EXTENDED_STATS usage notes");
+    if (autoExt) {
+      if (incPart) {
+        add("warn", `AUTO_STAT_EXTENSIONS is ON: whenever a SQL plan directive accumulates on the table, the next gather creates a column group by itself, and on an incremental table that gather rereads every unlocked partition${LCK > 0 ? `; with ${plural(LCK, "locked partition")} the global statistics then come from a full scan on every gather` : ""}. OFF, the default, leaves the moment to you.`, `${docs}; lab E4${LCK > 0 ? ", Tc" : ""}`);
+        fixAt(6, sp("AUTO_STAT_EXTENSIONS", "OFF"));
+      } else if (CAND === 0) add("info", "AUTO_STAT_EXTENSIONS is ON: a SQL plan directive on the table makes the next gather create a column group and gather it in the same pass. No extra reads on a plain table; the group appears without anyone deciding.", docs);
+    }
+  };
 
   const finish = (): Outcome => {
     o.blocks = blocksNow();
@@ -507,6 +564,11 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
     if (noInv === "TRUE") add("warn", "no_invalidate TRUE: this gather does not invalidate existing cursors; they use new statistics after a later hard parse.", "19c DBMS_STATS reference");
     if (cas === "FALSE" && p.indexCount > 0) add("info", "CASCADE FALSE: the indexes keep their statistics. CREATE INDEX and REBUILD compute their own, so a new index is not left without; an index whose table was reloaded or moved is.", "19c Tuning Guide; explainer chapter 10");
     if (p.tableStats === "none") add("info", "The table has no statistics yet: the first gather records everything, and the automatic job would have done the same at the next maintenance window.", "19c Tuning Guide");
+    // a column change on a plain table costs nothing extra: it is served from the same scan
+    if (p.columnChange === "group") add("info", "A column group exists but has no statistics yet: this gather computes them from the same scan (one more NDV, and a histogram if METHOD_OPT allows one). Until it runs, the optimizer ignores the group.", "19c DBMS_STATS reference, CREATE_EXTENDED_STATS");
+    else if (p.columnChange === "usage") add("info", mo === "auto" ? "A column was used in a predicate for the first time: under SIZE AUTO this gather considers it for a histogram, from the same scan or a histogram sample. Nothing to prepare." : "A column was used in a predicate for the first time. METHOD_OPT does not choose histograms from column usage here, so nothing changes for it.", "19c Tuning Guide; explainer chapter 5");
+    else if (p.columnChange === "histogram") add("info", "The column added to the pinned METHOD_OPT gets its histogram in this gather, from the same scan or a histogram sample.", "19c Tuning Guide");
+    groupAdvice();
     return finish();
   }
 
@@ -733,6 +795,8 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
     if (givenM && !ov) hurtCall = true; else fixAt(6, sp("METHOD_OPT", "FOR ALL COLUMNS SIZE AUTO"));
   }
 
+  groupAdvice();
+
   // 4.6 synopses afterwards
   const leftover = named && S === "all" ? left.newParts + (staleChg ? left.changedParts : 0) : 0;
   if (lockedNoSyn || LCKCHG > 0 || leftover > 0 || (S !== "all" && named && partOnly && left.lack > 0)) o.synopsesAfter = "partial";
@@ -837,6 +901,27 @@ export function verifySql(o: Outcome): string {
     "FROM   dba_tab_col_statistics",
     `WHERE  owner = ${own} AND table_name = ${tab};`,
   ];
+  if (p.columnGroups > 0 || p.columnGroupCandidates > 0 || p.columnChange === "group") {
+    lines.push(
+      "",
+      "-- Column groups (extended statistics), and whether each has statistics yet",
+      "SELECT e.extension_name, e.extension, c.num_distinct, c.histogram, c.last_analyzed",
+      "FROM   dba_stat_extensions e",
+      "       LEFT JOIN dba_tab_col_statistics c ON c.owner = e.owner AND c.table_name = e.table_name AND c.column_name = e.extension_name",
+      `WHERE  e.owner = ${own} AND e.table_name = ${tab};`,
+      "",
+      "-- SQL plan directives on the table: the column sets the optimizer misestimated, and whether with equality predicates only",
+      "SELECT d.directive_id, d.state, d.reason, d.last_used,",
+      "       LISTAGG(o.subobject_name, ', ') WITHIN GROUP (ORDER BY o.subobject_name) AS columns,",
+      "       MAX(EXTRACTVALUE(o.notes, '/obj_note/equality_predicates_only')) AS equality_only",
+      "FROM   dba_sql_plan_directives d JOIN dba_sql_plan_dir_objects o ON o.directive_id = d.directive_id",
+      `WHERE  o.owner = ${own} AND o.object_name = ${tab} AND d.type = 'DYNAMIC_SAMPLING'`,
+      "GROUP  BY d.directive_id, d.state, d.reason, d.last_used;",
+      "",
+      "-- The column (group) usage the next SIZE AUTO gather and CREATE_EXTENDED_STATS without an extension argument work from",
+      `SELECT DBMS_STATS.REPORT_COL_USAGE(${own}, ${tab}) FROM dual;`,
+    );
+  }
   if (p.partitioned) {
     lines.push(
       "",

@@ -57,12 +57,12 @@ function render(input: Input, clampNotes: string[]) {
   const rec = recOpen ? recommendedOf(input) : null;
   const shown = rec && view === "rec" ? rec : input;
   applyVisibility(shown);
-  const outcome = advise(shown);
+  const outcome = advise(shown, true, loaded);
   result.render(outcome, shown === input ? clampNotes : clampInput(shown).notes, shown);
   if (rec) {
-    const yours = shown === input ? outcome : advise(input);
+    const yours = shown === input ? outcome : advise(input, true, loaded);
     const scripts = setupScripts(input, loaded);
-    result.showCompare({ yours, rec: shown === rec ? outcome : advise(rec), scripts, loadedFromDb: loaded !== null, showing: view });
+    result.showCompare({ yours, rec: shown === rec ? outcome : advise(rec, true, loaded), scripts, loadedFromDb: loaded !== null, showing: view });
     $("#views-count").textContent = scripts.changed.length ? `· ${scripts.changed.length} changed` : "· same";
     for (const k of keys) ctl[k]?.wrap.classList.toggle("diff", input[k] !== rec[k]);
   } else result.showCompare(null);

@@ -6,7 +6,7 @@
 // HISTOGRAM_COLUMNS list.
 
 import { GRANULARITIES, NAME_MAX, OPTIONS, type Input } from "./defaults";
-import { emptyProvenance, type Provenance } from "./setup";
+import { emptyProvenance, type GroupCandidate, type Provenance } from "./setup";
 
 const ALIASES: Record<string, string> = {
   incremental: "INCREMENTAL", incremental_level: "INCREMENTAL_LEVEL", incr_level: "INCREMENTAL_LEVEL",
@@ -14,9 +14,9 @@ const ALIASES: Record<string, string> = {
   estimate_percent: "ESTIMATE_PERCENT", granularity: "GRANULARITY", method_opt: "METHOD_OPT",
   stale_percent: "STALE_PERCENT", preference_overrides_parameter: "PREFERENCE_OVERRIDES_PARAMETER", overrides: "PREFERENCE_OVERRIDES_PARAMETER",
   cascade: "CASCADE", no_invalidate: "NO_INVALIDATE", options: "OPTIONS", degree: "DEGREE",
-  approximate_ndv_algorithm: "APPROXIMATE_NDV_ALGORITHM",
+  approximate_ndv_algorithm: "APPROXIMATE_NDV_ALGORITHM", auto_stat_extensions: "AUTO_STAT_EXTENSIONS",
 };
-const UNMODELLED = new Set(["AUTOSTATS_TARGET", "TABLE_CACHED_BLOCKS", "AUTO_STAT_EXTENSIONS",
+const UNMODELLED = new Set(["AUTOSTATS_TARGET", "TABLE_CACHED_BLOCKS",
   "GLOBAL_TEMP_TABLE_STATS", "WAIT_TIME_TO_UPDATE_STATS", "ROOT_TRIGGER_PDB", "JOB_OVERHEAD", "JOB_OVERHEAD_PERC", "CONCURRENT", "AUTO_TASK_STATUS",
   "AUTO_TASK_MAX_RUN_TIME", "AUTO_TASK_INTERVAL", "INCREMENTAL_INTERNAL_CONTROL", "NDV_ALGORITHM", "SCAN_RATE", "MAXIMUM_AUTO_SAMPLE_PERCENT", "STAT_CATEGORY", "COORDINATOR_TRIGGER_SHARD"]);
 const canonical = (name: string): string | null => ALIASES[String(name).trim().toLowerCase()] ?? null;
@@ -30,6 +30,7 @@ const FORM_KEYS: Record<string, [keyof Input, Kind]> = {
   PARTITIONS: ["partitions", "number"], BLOCKS_PER_PARTITION: ["blocksPerPartition", "number"], BLOCKS: ["blocksPerPartition", "number"],
   NUM_ROWS: ["numRows", "number"], COLUMNS: ["columnCount", "number"], INDEXES: ["indexCount", "number"], LOCAL_INDEXES: ["localIndexCount", "number"],
   HISTOGRAMS: ["histogramsPresent", "flag"], COLUMN_USAGE: ["columnUsageRecorded", "flag"],
+  COLUMN_GROUPS: ["columnGroups", "number"], COLUMN_GROUP_CANDIDATES: ["columnGroupCandidates", "number"],
   NEW_PARTITIONS: ["newPartitions", "number"], CHANGED_PARTITIONS: ["changedPartitions", "number"], CHANGE_PERCENT: ["changePercent", "number"],
   TABLE_CHANGE_PERCENT: ["tableChangePercent", "number"], LOCKED_PARTITIONS: ["lockedPartitions", "number"],
   LOCKED_CHANGED: ["lockedChanged", "number"], SYNOPSES: ["synopses", "option"], TABLE_STATS: ["tableStats", "option"], COLUMN_CHANGE: ["columnChange", "option"],
@@ -137,6 +138,10 @@ function applyPref(name: string, raw: unknown, values: Values, notes: string[]):
     case "DEGREE":
       values.degree = v === "" ? "NULL" : v.slice(0, NAME_MAX);
       return { ok: true };
+    case "AUTO_STAT_EXTENSIONS":
+      if (u !== "ON" && u !== "OFF") return { ok: false, reason: "expected ON or OFF" };
+      values.autoStatExtensions = u;
+      return { ok: true };
     default: return { ok: false, reason: "not modelled" };
   }
   if (u !== "TRUE" && u !== "FALSE") { delete values[name === "INCREMENTAL" ? "incremental" : name === "PUBLISH" ? "publish" : "overrides"]; return { ok: false, reason: "expected TRUE or FALSE" }; }
@@ -148,6 +153,16 @@ export interface Parsed { values: Partial<Input>; recognised: string[]; ignored:
 /** The list keys of the collector's block, read into the provenance rather than the form. */
 const LIST_KEYS: Record<string, "tablePrefs" | "histogramColumns"> = { TABLE_PREFS: "tablePrefs", HISTOGRAM_COLUMNS: "histogramColumns" };
 const splitList = (v: string) => v.split(/[,\s]+/).map((x) => x.trim().replace(/^"(.*)"$/s, "$1")).filter(Boolean).map((x) => x.slice(0, NAME_MAX));
+/** `(A,B); (C,D,E)`: the column groups the table has, one list of column names per group. */
+const splitGroups = (v: string): string[][] => v.split(";").map((g) => splitList(g.trim().replace(/^\((.*)\)$/s, "$1"))).filter((g) => g.length >= 2);
+/** `A,B|directive,usage|eq|500; C,D|directive|range|0`: columns, where the set was seen, whether its predicates were all equalities, the product of the members' NDVs. */
+const splitCandidates = (v: string): GroupCandidate[] => v.split(";").map((c) => {
+  const [cols = "", src = "", kind = "", ndv = ""] = c.split("|").map((x) => x.trim());
+  const columns = splitList(cols);
+  const sources = src.toLowerCase().split(/[,\s]+/).filter((s): s is GroupCandidate["sources"][number] => s === "directive" || s === "usage");
+  const n = Number(ndv);
+  return { columns, sources, equality: kind.toLowerCase() !== "range", ndvProduct: ndv !== "" && Number.isFinite(n) && n > 0 ? n : null };
+}).filter((c) => c.columns.length >= 2);
 
 export function parsePrefs(text: string | null | undefined): Parsed {
   const values: Values = {}, recognised: string[] = [], ignored: string[] = [], ignoredDetail: { line: string; reason: string }[] = [], notes: string[] = [];
@@ -166,6 +181,20 @@ export function parsePrefs(text: string | null | undefined): Parsed {
     const c = canonical(name);
     if (Object.hasOwn(LIST_KEYS, key)) {
       provenance[LIST_KEYS[key]!] = splitList(String(value ?? "").trim().replace(/^\((.*)\)$/s, "$1"));
+      if (!recognised.includes(key)) recognised.push(key);
+    } else if (key === "COLUMN_GROUP_LIST" || key === "COLUMN_GROUP_CANDIDATE_LIST" || key === "COLUMN_GROUP_USAGE_LIST") {
+      if (key === "COLUMN_GROUP_LIST") provenance.columnGroups = splitGroups(String(value ?? ""));
+      else if (key === "COLUMN_GROUP_CANDIDATE_LIST") provenance.columnGroupCandidates = splitCandidates(String(value ?? ""));
+      else {
+        // the usage report's groups join the directive candidates: same column set, one candidate with both sources
+        const same = (a: string[], b: string[]) => a.length === b.length && [...a].sort().every((x, i) => x === [...b].sort()[i]);
+        for (const c of splitCandidates(String(value ?? ""))) {
+          const hit = provenance.columnGroupCandidates.find((x) => same(x.columns, c.columns));
+          if (hit) { if (!hit.sources.includes("usage")) hit.sources.push("usage"); hit.ndvProduct ??= c.ndvProduct; }
+          else provenance.columnGroupCandidates.push({ ...c, sources: ["usage"] });
+        }
+        values.columnGroupCandidates = provenance.columnGroupCandidates.filter((c) => c.equality).length;
+      }
       if (!recognised.includes(key)) recognised.push(key);
     } else if (Object.hasOwn(FORM_KEYS, key)) {
       const r = applyKey(key, value, values);

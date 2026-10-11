@@ -1,0 +1,82 @@
+
+Session altered.
+
+-- Gather advisor input for STATS_LAB.CG1, collected 2026-10-11 07:44:04
+-- paste everything from BEGIN to END (the whole output is fine) into the advisor
+-- ADVISOR INPUT BEGIN
+OWNER = STATS_LAB
+TABLE_NAME = CG1
+PARTITIONED = NO
+PARTITIONS = 1
+BLOCKS_PER_PARTITION = 1024
+NUM_ROWS = 200000
+COLUMNS = 7
+INDEXES = 0
+LOCAL_INDEXES = 0
+HISTOGRAMS = 0
+TABLE_STATS = gathered
+TABLE_CHANGE_PERCENT = 0
+INCREMENTAL = FALSE
+INCREMENTAL_LEVEL = PARTITION
+INCREMENTAL_STALENESS = ALLOW_MIXED_FORMAT
+APPROXIMATE_NDV_ALGORITHM = REPEAT OR HYPERLOGLOG
+PUBLISH = TRUE
+ESTIMATE_PERCENT = DBMS_STATS.AUTO_SAMPLE_SIZE
+GRANULARITY = AUTO
+METHOD_OPT = FOR ALL COLUMNS SIZE AUTO
+CASCADE = DBMS_STATS.AUTO_CASCADE
+NO_INVALIDATE = DBMS_STATS.AUTO_INVALIDATE
+OPTIONS = GATHER
+DEGREE = NULL
+STALE_PERCENT = 10
+PREFERENCE_OVERRIDES_PARAMETER = FALSE
+AUTO_STAT_EXTENSIONS = OFF
+TABLE_PREFS =
+HISTOGRAM_COLUMNS =
+-- histograms kept only for incremental statistics (NOTES HIST_FOR_INCREM_STATS, not used by the optimizer, so not pinned): (none)
+COLUMN_GROUPS = 0
+COLUMN_GROUP_LIST =
+SYNOPSES = none
+NEW_PARTITIONS = 0
+NEW_PARTITION =
+CHANGED_PARTITIONS = 0
+CHANGED_PARTITION =
+CHANGE_PERCENT = 0
+LOCKED_PARTITIONS = 0
+LOCKED_CHANGED = 0
+LOCKED_PARTITION =
+LOCKED_NO_SYNOPSIS = 0
+OLD_FORMAT_PARTITIONS = 0
+TABLE_LOCKED = 0
+COLUMN_CHANGE = none
+-- (statement 2 below may override COLUMN_CHANGE and COLUMN_USAGE from the column usage report, statement 3 SYNOPSES from the synopsis table)
+COLUMN_USAGE = 1
+COLUMN_CHANGE = usage
+-- columns used in predicates without a histogram: CITY,COUNTRY,PRODUCT_ID,SALE_DATE,STATUS
+SYNOPSES = none
+-- from the synopsis table: 0 partition(s) with a synopsis, 0 unlocked partition(s) analysed after their synopsis
+COLUMN_GROUP_CANDIDATES = 1
+COLUMN_GROUP_CANDIDATE_LIST = CITY,COUNTRY|directive|eq|500
+-- column sets a SQL plan directive misestimated, without a column group: eq = equality predicates only (a group helps), range = not (it does not); the number is the product of the members' NDVs
+COLUMN_GROUP_USAGE_LIST = CITY,COUNTRY|usage|eq|500; CITY,COUNTRY,STATUS|usage|eq|1000; PRODUCT_ID,STATUS|usage|eq|14
+-- column sets SEED_COL_USAGE recorded without a column group (3); the paste box adds them to the candidates
+-- ADVISOR INPUT END
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+| Operation Id | Operation                           | Target            | Start Time | End Time | Status | Total Tasks | Successful Tasks | Failed Tasks | Active Tasks                              |
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+| 4710         | gather_table_stats (reporting mode) | "STATS_LAB"."CG1" |            |          |        | 1           |                  |              |                                           |
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+|                                                                                                                                                                                                     |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|                                                                                              T A S K S                                                                                              |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|    ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------    |
+|    | Target            | Type  | Start Time | End Time | Status                                                                                                                                |    |
+|    ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------    |
+|    | "STATS_LAB"."CG1" | TABLE |            |          |                                                                                                                                       |    |
+|    ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------    |
+|                                                                                                                                                                                                     |
+|                                                                                                                                                                                                     |
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+

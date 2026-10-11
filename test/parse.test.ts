@@ -167,3 +167,31 @@ SYNOPSES = all
     expect(r.values.synopses).toBe("all");
   });
 });
+
+describe("a real collect.sql output with column group candidates (19.27, STATS_LAB.CG1)", () => {
+  test("the directive candidate and the seeded usage groups merge, the count follows the merge", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const text = await readFile(new URL("./fixtures/collect-cg1.txt", import.meta.url), "utf8");
+    const r = parsePrefs(text);
+    expect(r.ignored).toEqual([]);
+    expect(r.values.autoStatExtensions).toBe("OFF");
+    expect(r.values.columnGroups).toBe(0);
+    expect(r.values.columnGroupCandidates).toBe(3);
+    expect(r.values.columnChange).toBe("usage");
+    expect(r.provenance.columnGroupCandidates).toEqual([
+      { columns: ["CITY", "COUNTRY"], sources: ["directive", "usage"], equality: true, ndvProduct: 500 },
+      { columns: ["CITY", "COUNTRY", "STATUS"], sources: ["usage"], equality: true, ndvProduct: 1000 },
+      { columns: ["PRODUCT_ID", "STATUS"], sources: ["usage"], equality: true, ndvProduct: 14 },
+    ]);
+  });
+  test("an existing group and a range-only directive: no candidate, the directive kept for the note", () => {
+    const r = parsePrefs(["ADVISOR INPUT BEGIN", "COLUMN_GROUPS = 1", "COLUMN_GROUP_LIST = (STATUS,PRODUCT_ID)", "COLUMN_GROUP_CANDIDATES = 0",
+      "COLUMN_GROUP_CANDIDATE_LIST = SALE_DATE,STATUS|directive|range|6108", "COLUMN_GROUP_USAGE_LIST =", "AUTO_STAT_EXTENSIONS = ON", "ADVISOR INPUT END"].join("\n"));
+    expect(r.values.columnGroups).toBe(1);
+    expect(r.values.columnGroupCandidates).toBe(0);
+    expect(r.values.autoStatExtensions).toBe("ON");
+    expect(r.provenance.columnGroups).toEqual([["STATUS", "PRODUCT_ID"]]);
+    expect(r.provenance.columnGroupCandidates).toEqual([{ columns: ["SALE_DATE", "STATUS"], sources: ["directive"], equality: false, ndvProduct: 6108 }]);
+    expect(parsePrefs("AUTO_STAT_EXTENSIONS = MAYBE").ignoredDetail[0]?.reason).toBe("expected ON or OFF");
+  });
+});

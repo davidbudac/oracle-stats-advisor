@@ -158,3 +158,23 @@ AUTO_SAMPLE_SIZE, METHOD_OPT FOR ALL COLUMNS SIZE AUTO, PREFERENCE_OVERRIDES_PAR
 - Tl new empty partition with copied statistics, locked: GLOBAL full scan on each of two gathers with USE_LOCKED_STATS, and again without it.
 - Every SQL block published in the new sections was run once against a lab copy (STATS_LAB.SHOPSALES) with names substituted; all executed.
 - `opatch lsinventory -bugs_fixed` of the lab home does not list bug 31464691 (the METHOD_OPT table-preference patch named in Oracle's optimizer blog).
+
+## Column groups (2026-10-11, 19.27, plain table STATS_LAB.CG1)
+
+- CG1: 200,000 rows, CITY (50 values) nested in COUNTRY (10 values), PRODUCT_ID (7), STATUS (2). Gathered, then
+  `SEED_COL_USAGE(NULL, NULL, 300)` and four equality queries: `REPORT_COL_USAGE` lists `(CITY, COUNTRY) : FILTER`,
+  `(PRODUCT_ID, STATUS) : FILTER`, `(CITY, COUNTRY, STATUS) : FILTER`; `SYS.COL_GROUP_USAGE$` holds them as column
+  position lists (`2,3`, `4,5`, `2,3,5`).
+- With `OPTIMIZER_ADAPTIVE_STATISTICS = FALSE` (the 19c default) the queries created no SQL plan directive. With it TRUE
+  for the session, two executions each and `DBMS_SPD.FLUSH_SQL_PLAN_DIRECTIVE`: one USABLE `DYNAMIC_SAMPLING`
+  directive, `SINGLE TABLE CARDINALITY MISESTIMATE`, objects CITY, COUNTRY and the table with
+  `<equality_predicates_only>YES</equality_predicates_only>`. No directive for (PRODUCT_ID, STATUS), which are
+  independent, nor for the range query on (SALE_DATE, STATUS).
+- collect.sql: `COLUMN_GROUP_CANDIDATE_LIST = CITY,COUNTRY|directive|eq|500` (50 × 10), the three usage sets in
+  `COLUMN_GROUP_USAGE_LIST`; the paste merges them into three candidates, (CITY, COUNTRY) with both sources.
+- `CREATE_EXTENDED_STATS('STATS_LAB', 'CG1', '(CITY, COUNTRY)')`, no gather yet: `COLUMN_GROUPS = 1`,
+  `COLUMN_CHANGE = group`, the set gone from both candidate lists. After `GATHER_TABLE_STATS`: the extension has
+  NUM_DISTINCT 50 against the product of 500, no histogram (SIZE AUTO, no usage of the extension yet). The directive
+  stays USABLE after the gather.
+- SALES (partitioned, 35 partitions) has the lab's `(STATUS, PRODUCT_ID)` group from E4 and a directive on
+  (SALE_DATE, STATUS) with `equality_predicates_only = NO`: reported as `|directive|range|6108` and not counted.

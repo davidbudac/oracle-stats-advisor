@@ -104,3 +104,13 @@ SYNOPSES = none
     expect(apply).not.toMatch(/build the synopses/);
   });
 });
+
+describe("AUTO_STAT_EXTENSIONS in the recommended setup", () => {
+  test("ON is turned OFF, and rolled back to ON", () => {
+    const { apply, rollback, changed } = setupScripts({ ...base, ...RECOMMENDED, autoStatExtensions: "ON" }, null);
+    expect(changed).toEqual(["AUTO_STAT_EXTENSIONS"]);
+    expect(execs(apply)).toEqual(["EXEC DBMS_STATS.SET_TABLE_PREFS('SHOP', 'SALES', 'AUTO_STAT_EXTENSIONS', 'OFF')"]);
+    expect(execs(rollback)).toEqual(["EXEC DBMS_STATS.SET_TABLE_PREFS('SHOP', 'SALES', 'AUTO_STAT_EXTENSIONS', 'ON')"]);
+    expect(setupScripts({ ...base, ...RECOMMENDED }, null).changed).toEqual([]);
+  });
+});

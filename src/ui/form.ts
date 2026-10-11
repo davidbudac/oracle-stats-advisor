@@ -30,6 +30,7 @@ export const LABELS: Partial<Record<keyof Input, Record<string, string>>> = {
   synopses: { all: "Every partition has one that matches", none: "None yet", stale: "They exist but no longer match" },
   tableStats: { gathered: "Gathered before", none: "None yet", load: "From a direct-path load (STATS_ON_LOAD)" },
   columnChange: { none: "None", usage: "A first predicate on a column with no histogram", group: "A new column group", histogram: "One more histogram in the pinned METHOD_OPT" },
+  autoStatExtensions: { OFF: "OFF: column groups are created by hand (default)", ON: "ON: a SQL plan directive makes the gather create column groups" },
 };
 
 export const GROUPS: Group[] = [
@@ -45,6 +46,8 @@ export const GROUPS: Group[] = [
     { key: "localIndexCount", type: "number", label: "Of those, local", min: 0, step: 1, show: isPart },
     { key: "histogramsPresent", type: "check", label: "The table has histograms today" },
     { key: "columnUsageRecorded", type: "check", label: "Column usage has been recorded (queries filtered on its columns)" },
+    { key: "columnGroups", type: "number", label: "Column groups (extended statistics) on the table", min: 0, step: 1 },
+    { key: "columnGroupCandidates", type: "number", label: "Column sets filtered together that have no column group", min: 0, step: 1, hint: "a SQL plan directive with equality predicates, or a group recorded by SEED_COL_USAGE; collect.sql counts them" },
   ] },
   { id: "prefs", legend: "Preferences in force", buttons: true, fields: [
     { key: "incremental", type: "select", label: "INCREMENTAL" },
@@ -61,6 +64,7 @@ export const GROUPS: Group[] = [
     { key: "degree", type: "text", label: "DEGREE (shown, not modelled)" },
     { key: "stalePercent", type: "number", label: "STALE_PERCENT", min: 0, step: "any" },
     { key: "overrides", type: "select", label: "PREFERENCE_OVERRIDES_PARAMETER" },
+    { key: "autoStatExtensions", type: "select", label: "AUTO_STAT_EXTENSIONS" },
   ] },
   { id: "call", legend: "The gather", fields: [
     { key: "runBy", type: "select", label: "Run by" },
@@ -87,7 +91,7 @@ export const GROUPS: Group[] = [
     { key: "lockedNoSynopsis", type: "check", label: "A locked partition has no synopsis, or none for a column group (statistics copied in and locked, or a group added after the lock)", show: (i) => isPart(i) && i.lockedPartitions > 0 },
     { key: "oldFormatPartitions", type: "number", label: "Partitions whose synopsis is in the old adaptive-sampling format (11g, 12.1)", min: 0, step: 1, show: (i) => isPart(i) && i.synopses !== "none" },
     { key: "tableLocked", type: "check", label: "LOCK_TABLE_STATS on the table" },
-    { key: "columnChange", type: "select", label: "Column change", show: isPart },
+    { key: "columnChange", type: "select", label: "Column change" },
   ] },
 ];
 

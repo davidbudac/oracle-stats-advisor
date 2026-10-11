@@ -16,9 +16,16 @@ export interface Provenance {
   histogramColumns: string[];
   /** The preference text as pasted, by canonical name, for an exact rollback. */
   raw: Record<string, string>;
+  /** The column groups (extended statistics) the table has, one list of column names per group. */
+  columnGroups: string[][];
+  /** Column sets the collector found without a group: from a SQL plan directive, from SEED_COL_USAGE, or both. */
+  columnGroupCandidates: GroupCandidate[];
 }
 
-export const emptyProvenance = (): Provenance => ({ tablePrefs: null, histogramColumns: [], raw: {} });
+/** One column set without a column group. `equality` is false when the directive's predicates were not all equalities (a group would not be used). */
+export interface GroupCandidate { columns: string[]; sources: ("directive" | "usage")[]; equality: boolean; ndvProduct: number | null }
+
+export const emptyProvenance = (): Provenance => ({ tablePrefs: null, histogramColumns: [], raw: {}, columnGroups: [], columnGroupCandidates: [] });
 
 /** The preference each form field feeds; editing the field makes the pasted text of that preference stale. */
 export const PREF_OF_FIELD: Partial<Record<keyof Input, string>> = {
@@ -26,6 +33,7 @@ export const PREF_OF_FIELD: Partial<Record<keyof Input, string>> = {
   useStalePercent: "INCREMENTAL_STALENESS", useLockedStats: "INCREMENTAL_STALENESS", allowMixedFormat: "INCREMENTAL_STALENESS", ndvAlgorithm: "APPROXIMATE_NDV_ALGORITHM",
   publish: "PUBLISH", estimatePercent: "ESTIMATE_PERCENT", granularity: "GRANULARITY", methodOpt: "METHOD_OPT",
   overrides: "PREFERENCE_OVERRIDES_PARAMETER", cascade: "CASCADE", noInvalidate: "NO_INVALIDATE", options: "OPTIONS", degree: "DEGREE", stalePercent: "STALE_PERCENT",
+  autoStatExtensions: "AUTO_STAT_EXTENSIONS",
 };
 
 export const COLUMN_PLACEHOLDER = "<column list>";
@@ -64,6 +72,8 @@ export function setupScripts(before: Input, prov: Provenance | null): SetupScrip
     { name: "GRANULARITY", before: raw("GRANULARITY") ?? before.granularity, after: after.granularity, changed: before.granularity !== after.granularity },
     { name: "METHOD_OPT", before: methodText(before), after: pinned, changed: before.methodOpt !== "pinned" },
     { name: "PREFERENCE_OVERRIDES_PARAMETER", before: raw("PREFERENCE_OVERRIDES_PARAMETER") ?? before.overrides, after: after.overrides, changed: before.overrides !== after.overrides },
+    // OFF: a directive-born column group would reread every partition at an unplanned gather (lab E4); create groups by hand instead
+    { name: "AUTO_STAT_EXTENSIONS", before: raw("AUTO_STAT_EXTENSIONS") ?? before.autoStatExtensions, after: after.autoStatExtensions, changed: before.autoStatExtensions !== after.autoStatExtensions },
   ];
   const changed = prefs.filter((p) => p.changed);
   const kept = prefs.filter((p) => !p.changed);

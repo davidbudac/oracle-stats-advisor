@@ -245,3 +245,59 @@ describe("steps", () => {
     expect(s.text).toMatch(/preferences that differ/);
   });
 });
+
+// ---------------------------------------------------------------- column groups (extended statistics)
+describe("column groups: what the table has, what the workload asks for, what creating one costs", () => {
+  const flat: Partial<Input> = { partitioned: false, blocksPerPartition: 1200, numRows: 200000, columnCount: 7, newPartitions: 0 };
+  const prov = { tablePrefs: null, histogramColumns: [], raw: {}, columnGroups: [], columnGroupCandidates: [
+    { columns: ["CITY", "COUNTRY"], sources: ["directive", "usage"] as ("directive" | "usage")[], equality: true, ndvProduct: 500 },
+    { columns: ["SALE_DATE", "STATUS"], sources: ["directive"] as ("directive" | "usage")[], equality: false, ndvProduct: 6108 },
+  ] };
+  test("a plain table with a candidate: a warning, CREATE_EXTENDED_STATS as a SELECT, placeholders without a paste", () => {
+    const o = run({ ...flat, columnGroupCandidates: 1 });
+    expect(o.findings.find((f) => f.level === "warn")?.text).toMatch(/A column set the workload filters together has no column group\./);
+    expect(o.fixes).toContain("SELECT DBMS_STATS.CREATE_EXTENDED_STATS('OWNER', 'TABLE', '(<column>, <column>)') FROM dual;");
+    expect(o.verdict[0]).toBe("good"); // this gather reads the same either way
+    expect(verifySql(o)).toMatch(/dba_sql_plan_directives/);
+    expect(verifySql(run(flat))).not.toMatch(/dba_sql_plan_directives/);
+  });
+  test("with the paste: names, the NDV product, the range-only directive explained, the existing group noted", () => {
+    const o = advise({ ...DEFAULTS, ...flat, owner: "STATS_LAB", tableName: "CG1", columnGroupCandidates: 1, columnGroups: 1 }, true, { ...prov, columnGroups: [["STATUS", "PRODUCT_ID"]] });
+    const warn = o.findings.find((f) => f.level === "warn")!.text;
+    expect(warn).toMatch(/\(CITY, COUNTRY\)/);
+    expect(warn).toMatch(/500 distinct combinations, fewer only if the columns are correlated/);
+    expect(warn).toMatch(/SQL plan directive records/);
+    expect(warn).toMatch(/SEED_COL_USAGE recorded/);
+    expect(o.fixes).toContain("SELECT DBMS_STATS.CREATE_EXTENDED_STATS('STATS_LAB', 'CG1', '(CITY, COUNTRY)') FROM dual;");
+    expect(o.fixes.join("\n")).toMatch(/DROP_EXTENDED_STATS\('STATS_LAB', 'CG1', '\(CITY, COUNTRY\)'\)/);
+    expect(o.findings.some((f) => /\(SALE_DATE, STATUS\), but its predicates are not all equalities/.test(f.text))).toBe(true);
+    expect(o.findings.some((f) => /The table has 1 column group \(STATUS, PRODUCT_ID\)/.test(f.text))).toBe(true);
+  });
+  test("a partitioned incremental table: the reread at the next gather (lab E4); with a locked partition the permanent full scan (lab Tc)", () => {
+    const o = run({ ...inc, columnGroupCandidates: 1 });
+    expect(o.findings.some((f) => f.level === "info" && /one reread of every unlocked partition at the next gather/.test(f.text))).toBe(true);
+    expect(o.blocks).toBe(B); // nothing changes for this gather
+    const l = run({ ...inc, columnGroupCandidates: 1, lockedPartitions: 1, lockedPartitionName: "S_2024_05" });
+    expect(l.findings.some((f) => f.level === "bad" && /create the group, unlock, gather, lock again/.test(f.text))).toBe(true);
+    expect(l.fixes).toContain("EXEC DBMS_STATS.UNLOCK_PARTITION_STATS('OWNER', 'TABLE', 'S_2024_05')");
+  });
+  test("AUTO_STAT_EXTENSIONS ON: a warning and a fix on an incremental table, a note on a plain one", () => {
+    const o = run({ ...inc, autoStatExtensions: "ON" });
+    expect(o.findings.some((f) => f.level === "warn" && /AUTO_STAT_EXTENSIONS is ON/.test(f.text))).toBe(true);
+    expect(o.fixes).toContain("EXEC DBMS_STATS.SET_TABLE_PREFS('OWNER', 'TABLE', 'AUTO_STAT_EXTENSIONS', 'OFF')");
+    const f = run({ ...flat, autoStatExtensions: "ON" });
+    expect(f.findings.some((x) => x.level === "info" && /AUTO_STAT_EXTENSIONS is ON/.test(x.text))).toBe(true);
+    expect(f.fixes.join("\n")).not.toMatch(/AUTO_STAT_EXTENSIONS/);
+  });
+  test("the extension limit: the greater of 20 and 10% of the columns", () => {
+    expect(run({ ...flat, columnGroups: 20, columnGroupCandidates: 1 }).findings.some((f) => /at most 20 extensions/.test(f.text))).toBe(true);
+    expect(run({ ...flat, columnCount: 300, columnGroups: 20, columnGroupCandidates: 1 }).findings.some((f) => /at most \d+ extensions/.test(f.text))).toBe(false);
+  });
+  test("a plain table with a column change: notes only, nothing extra read", () => {
+    const g = run({ ...flat, columnChange: "group" });
+    expect(g.findings.some((f) => /A column group exists but has no statistics yet/.test(f.text))).toBe(true);
+    expect(g.blocks).toBe(run(flat).blocks);
+    expect(run({ ...flat, columnChange: "usage" }).findings.some((f) => /considers it for a histogram/.test(f.text))).toBe(true);
+    expect(run({ ...flat, columnChange: "usage", methodOpt: "repeat" }).findings.some((f) => /does not choose histograms from column usage/.test(f.text))).toBe(true);
+  });
+});
