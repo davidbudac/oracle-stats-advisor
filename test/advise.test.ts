@@ -402,7 +402,7 @@ describe("a partition exchanged in since the last gather", () => {
       /GATHER_TABLE_STATS\('SHOP', 'SALES', partname => 'SALES_2025_12', granularity => 'PARTITION'\)/,
       /GATHER_TABLE_STATS\('SHOP', 'STAGING_TABLE'\)/,
       /ALTER TABLE SHOP\.SALES EXCHANGE PARTITION SALES_2025_12 WITH TABLE STAGING_TABLE/,
-      /GATHER_TABLE_STATS\('SHOP', 'SALES'\)  --/,
+      /GATHER_TABLE_STATS\('SHOP', 'SALES'\)$/m,
     ].map(at);
     expect(order.every((i) => i >= 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);

@@ -466,9 +466,9 @@ FROM  (SELECT 1 AS grp, 0 AS ord, '--   column groups: ' || TO_CHAR(tb.n_ext) ||
        FROM   extset x
        UNION ALL
        SELECT 3, ROWNUM, CASE WHEN c.kind = 'eq'
-                   THEN 'SELECT DBMS_STATS.CREATE_EXTENDED_STATS(''' || tb.own || ''', ''' || tb.tab || ''', ''(' || c.pretty || ')'') FROM dual;'
-                        || '   -- a SQL plan directive misestimated these columns together (equality predicates); NDV product ' || TO_CHAR(c.ndv_product)
-                        || CASE WHEN c.ndv_product > tb.num_rows THEN ', more than the ' || TO_CHAR(tb.num_rows) || ' rows' END
+                   THEN '-- a SQL plan directive misestimated these columns together (equality predicates); NDV product ' || TO_CHAR(c.ndv_product)
+                        || CASE WHEN c.ndv_product > tb.num_rows THEN ', more than the ' || TO_CHAR(tb.num_rows) || ' rows' END || CHR(10)
+                        || 'SELECT DBMS_STATS.CREATE_EXTENDED_STATS(''' || tb.own || ''', ''' || tb.tab || ''', ''(' || c.pretty || ')'') FROM dual;'
                    ELSE '--   (' || c.pretty || '): a SQL plan directive, but not with equality predicates only; a column group would not be used for those queries' END
        FROM   cand c, tb
        UNION ALL
@@ -537,8 +537,8 @@ WITH p AS (
   AND    NOT EXISTS (SELECT 1 FROM dsets d WHERE d.cols = gs.cols)
   GROUP  BY gs.cols
 )
-SELECT 'SELECT DBMS_STATS.CREATE_EXTENDED_STATS(''' || p.own || ''', ''' || p.tab || ''', ''(' || c.pretty || ')'') FROM dual;'
-       || '   -- SEED_COL_USAGE recorded these columns filtered together; NDV product ' || TO_CHAR(c.ndv_product) AS line
+SELECT '-- SEED_COL_USAGE recorded these columns filtered together; NDV product ' || TO_CHAR(c.ndv_product) || CHR(10)
+       || 'SELECT DBMS_STATS.CREATE_EXTENDED_STATS(''' || p.own || ''', ''' || p.tab || ''', ''(' || c.pretty || ')'') FROM dual;' AS line
 FROM   cand c, p
 ORDER  BY c.cols;
 
@@ -664,8 +664,8 @@ WITH p AS (
   WHERE  EXISTS (SELECT 1 FROM cols WHERE INSTR(cn.e, '"' || cols.column_name || '"') > 0)
   AND    NOT EXISTS (SELECT 1 FROM have1 WHERE have1.t = REPLACE(REPLACE(UPPER(cn.e), ' ', ''), '"', ''))
 )
-SELECT '-- SELECT DBMS_STATS.CREATE_EXTENDED_STATS(''' || p.own || ''', ''' || p.tab || ''', ''(' || REPLACE(ok.e, '''', '''''') || ')'') FROM dual;'
-       || '   -- seen in a cached plan (weak evidence); helps only if queries filter on this expression' AS line
+SELECT '-- seen in a cached plan (weak evidence); helps only if queries filter on this expression' || CHR(10)
+       || '-- SELECT DBMS_STATS.CREATE_EXTENDED_STATS(''' || p.own || ''', ''' || p.tab || ''', ''(' || REPLACE(ok.e, '''', '''''') || ')'') FROM dual;' AS line
 FROM   ok, p
 WHERE  ok.rn <= 20
 ORDER  BY ok.rn;

@@ -53,9 +53,9 @@ describe("ORASTATS_TEST.ORDERS (plain, METHOD_OPT SIZE 1, four indexes)", () => 
     const s = histogramsSection(c)!;
     expect(s.rows!.body).toHaveLength(1);
     expect(s.rows!.body[0]).toEqual(["CHANNEL", "FREQUENCY", "3", "3", "600,000 (100%)", "none recorded"]);
-    const f = find(s, /CHANNEL has a histogram but no recorded predicate/)!;
+    const f = find(s, /CHANNEL has a histogram but no recorded filter or join/)!;
     expect(f.level).toBe("info");
-    expect(f.text).toMatch(/METHOD_OPT is SIZE 1, so the next gather deletes it/);
+    expect(f.text).toMatch(/METHOD_OPT is SIZE 1, so the next gather deletes it\.$/);
     expect(find(s, /CUSTOMER_ID, STATUS.*no histogram.*METHOD_OPT is SIZE 1/)).toBeDefined();
     expect(levels(s)).not.toContain("warn");
   });
@@ -69,15 +69,20 @@ describe("ORASTATS_TEST.ORDERS (plain, METHOD_OPT SIZE 1, four indexes)", () => 
     expect(f.basis).toMatch(/close to the number of rows indicates that the rows are scattered/);
     expect(find(s, /ORDERS_ORDER_DATE_IX/ )).toBeDefined();
   });
-  test("indexes: TABLE_CACHED_BLOCKS is offered only for the scattered index that is used", () => {
-    const f = find(indexesSection(c)!, /TABLE_CACHED_BLOCKS/)!;
-    expect(f.text).toMatch(/^ORDERS_CUSTOMER_IX has a clustering factor above 90% of the rows/);
+  test("indexes: TABLE_CACHED_BLOCKS is part of the scattered finding, for the index that is used, and states no range", () => {
+    const s = indexesSection(c)!;
+    const f = find(s, /TABLE_CACHED_BLOCKS/)!;
+    expect(f.text).toMatch(/^ORDERS_CUSTOMER_IX \(clustering factor 599,338/);
+    expect(f.text).toMatch(/TABLE_CACHED_BLOCKS \(now 1\) is the number of blocks the gather assumes cached/);
+    expect(f.text).not.toMatch(/\b255\b|0\.\.|range of|AUTO value/); // the 19c page names no range or default
     expect(f.fix).toContain("EXEC DBMS_STATS.SET_TABLE_PREFS('ORASTATS_TEST', 'ORDERS', 'TABLE_CACHED_BLOCKS', '16')");
-    expect(f.basis).toMatch(/inferred/);
+    expect(f.basis).toMatch(/Specifies the average number of blocks assumed to be cached/);
+    expect(f.basis).toMatch(/gives no range or default/);
+    expect(s.findings.filter((x) => /ORDERS_CUSTOMER_IX/.test(x.text))).toHaveLength(1); // one finding per index, not two
   });
-  test("indexes: no recorded use is a warning, never a drop; the primary key is only mentioned", () => {
+  test("indexes: no recorded use is context, never a drop; the primary key is only mentioned", () => {
     const f = find(indexesSection(c)!, /^No recorded use/)!;
-    expect(f.level).toBe("warn");
+    expect(f.level).toBe("info"); // DBA_INDEX_USAGE is sampled
     expect(f.text).toMatch(/ORDERS_ORDER_DATE_IX, ORDERS_STATUS_IX\./);
     expect(f.text).toMatch(/ORDERS_PK is unique and serves a constraint/);
     expect(f.text).toMatch(/sampled by default and flushed every 15 minutes/);
@@ -87,10 +92,11 @@ describe("ORASTATS_TEST.ORDERS (plain, METHOD_OPT SIZE 1, four indexes)", () => 
     ]);
     expect(f.fix!.join("\n")).not.toMatch(/DROP INDEX/i);
   });
-  test("indexes: AUTO_CASCADE scans all four, 7,085 leaf blocks against about 6,272 table blocks", () => {
-    const f = find(indexesSection(c)!, /With CASCADE => AUTO_CASCADE/)!;
-    expect(f.level).toBe("warn");
-    expect(f.text).toMatch(/all 4 indexes in full, changed or not: 7,085 leaf blocks against about 6,272 table blocks/);
+  test("indexes: AUTO_CASCADE gathers all four, 7,085 leaf blocks against about 6,272 table blocks", () => {
+    const f = find(indexesSection(c)!, /CASCADE is AUTO_CASCADE/)!;
+    expect(f.level).toBe("info");
+    expect(f.text).toMatch(/also gathers 4 indexes: 7,085 leaf blocks against about 6,272 table blocks/);
+    expect(f.basis).toMatch(/enable the database to determine whether index statistics need to be collected/);
   });
   test("extended: the column set a directive and SEED_COL_USAGE both named is evidence, not a second CREATE", () => {
     const s = extendedSection(c)!;
@@ -120,12 +126,12 @@ describe("ORASTATS_TEST.EXPR_PRED (six expression extensions)", () => {
     expect(levels(s)).toContain("good");
     expect(s.summary).toMatch(/0 column groups, 6 expression extensions/);
     // groups never appear: no usage-recorded column group, so the SEED_COL_USAGE recipe is offered
-    expect(find(s, /SEED_COL_USAGE/)!.fix![1]).toBe("EXEC DBMS_STATS.SEED_COL_USAGE(NULL, NULL, 900)  -- watch every statement for 15 minutes; use a longer window or a SQL tuning set for a real workload");
+    expect(find(s, /SEED_COL_USAGE/)!.fix).toContain("EXEC DBMS_STATS.SEED_COL_USAGE(NULL, NULL, 900)");
   });
   test("histograms: expression histograms carry the extension text", () => {
     const s = histogramsSection(c)!;
     expect(s.rows!.body.map((r) => r[0]).sort()).toEqual(['(SUBSTR("C_H",1,2))', '(TRUNC("D_H"))', '(UPPER("T_H"))']);
-    expect(find(s, /FREQUENCY histogram with one bucket per distinct value/)!.level).toBe("good");
+    expect(find(s, /FREQUENCY histogram from all rows, one bucket per value/)!.level).toBe("good");
   });
 });
 
@@ -137,12 +143,12 @@ describe("STATS_LAB.CG1 (plain, two column groups, one without statistics)", () 
     const f = find(s, /^\(PRODUCT_ID, STATUS\) has no statistics yet/)!;
     expect(f.level).toBe("info"); // plain table: nothing is reread
     expect(f.text).toMatch(/the next gather computes it/);
-    expect(find(s, /^\(CITY, COUNTRY\): the group has 50 distinct combinations where the columns alone multiply to 500 \(10 times more\)/)).toBeDefined();
+    expect(find(s, /^\(CITY, COUNTRY\): 50 distinct combinations against 500 for independent columns \(10 times fewer\)/)).toBeDefined();
     const cand = find(s, /^\(CITY, COUNTRY, STATUS\)/)!;
     expect(cand.text).toMatch(/SEED_COL_USAGE recorded them filtered together/);
     expect(cand.text).toMatch(/between 50 .* and 1,000/);
     expect(levels(s)).not.toContain("warn");
-    expect(find(s, /SEED_COL_USAGE watches/)).toBeUndefined(); // usage evidence exists: no recipe
+    expect(find(s, /SEED_COL_USAGE records the column groups/)).toBeUndefined(); // usage evidence exists: no recipe
   });
 });
 
@@ -150,20 +156,22 @@ describe("STATS_LAB.SALES (partitioned, incremental, one group, two indexes)", (
   const c = load("stats_lab-sales");
   test("histograms: four HIST_FOR_INCREM_STATS histograms are left alone, nothing is called unused", () => {
     const s = histogramsSection(c)!;
-    const f = find(s, /only to derive the table's global statistics/)!;
+    const f = find(s, /only supports the global statistics/)!;
     expect(f.level).toBe("info");
     expect(f.text).toMatch(/^SALE_DATE, PRODUCT_ID, CUSTOMER_ID, AMOUNT have a histogram/);
-    expect(f.text).toMatch(/turns them into real histograms and rereads every partition/);
+    expect(f.text).toMatch(/naming them makes them real histograms and rereads every partition/);
+    // the NOTES value is documented on the partition-column page of the Reference, not on the table-column page
+    expect(f.basis).toMatch(/ALL_PART_COL_STATISTICS\.NOTES.*A histogram used to support incremental statistics has been created and it is not used for optimization/);
     expect(s.rows!.body[0]![1]).toBe("HYBRID (support only)");
     expect(levels(s)).not.toContain("warn");
   });
-  test("extended: the group has no recorded use but that proves nothing; its NDV equals the independent product", () => {
+  test("extended: the group's NDV is within 2.4% of the independent product: one finding, not two", () => {
     const s = extendedSection(c)!;
-    const quiet = find(s, /is not in REPORT_COL_USAGE/)!;
-    expect(quiet.level).toBe("info");
-    expect(quiet.text).toMatch(/nothing shows it ever ran/);
-    const dup = find(s, /^\(STATUS, PRODUCT_ID\): the group has 19,815 distinct combinations and the columns alone multiply to 19,340/)!;
+    expect(find(s, /is not in REPORT_COL_USAGE/)).toBeUndefined(); // folded into the finding below
+    const dup = find(s, /^\(STATUS, PRODUCT_ID\): 19,815 distinct combinations against 19,340 for the columns alone/)!;
     expect(dup.level).toBe("warn");
+    expect(dup.text).toMatch(/Both NDVs are approximate/);
+    expect(dup.text).toMatch(/Confirm with SEED_COL_USAGE before dropping it/);
     expect(dup.fix).toContain("EXEC DBMS_STATS.DROP_EXTENDED_STATS('STATS_LAB', 'SALES', '(\"STATUS\",\"PRODUCT_ID\")')");
     expect(find(s, /^\(SALE_DATE, STATUS\).*not with equality predicates only/)).toBeDefined();
   });
@@ -177,10 +185,10 @@ describe("STATS_LAB.SALES (partitioned, incremental, one group, two indexes)", (
   });
   test("indexes: with AUTO_CASCADE the local and the global index are both named", () => {
     const s = indexesSection(load("stats_lab-sales", { cascade: "AUTO_CASCADE" }))!;
-    const f = find(s, /With CASCADE => AUTO_CASCADE/)!;
-    expect(f.text).toMatch(/all 2 indexes in full.*6,690 leaf blocks against about 13,824 table blocks/);
-    expect(f.text).toMatch(/SALES_ID_IX is a global index: its statistics need a full index scan/);
-    expect(f.text).toMatch(/SALES_PROD_IX is local: the new partition is scanned and, in the lab, the whole local index too/);
+    const f = find(s, /CASCADE is AUTO_CASCADE/)!;
+    expect(f.text).toMatch(/also gathers 2 indexes: 6,690 leaf blocks against about 13,824 table blocks/);
+    expect(f.text).toMatch(/On an incremental table a global index needs a full index scan \(SALES_ID_IX\)/);
+    expect(f.text).toMatch(/SALES_PROD_IX is local: the modified index partitions are scanned and, in the lab, the whole local index too/);
     expect(f.basis).toMatch(/lab F2, F3/);
     expect(f.level).toBe("info");
   });
@@ -200,7 +208,7 @@ describe("STATS_LAB.C1 (no usage recorded, no indexes)", () => {
     expect(s.rows).toBeUndefined();
   });
   test("the SEED_COL_USAGE recipe uses the table's owner and name", () => {
-    const f = find(extendedSection(c)!, /SEED_COL_USAGE watches/)!;
+    const f = find(extendedSection(c)!, /SEED_COL_USAGE records the column groups/)!;
     expect(f.fix).toContain("SELECT DBMS_STATS.REPORT_COL_USAGE('STATS_LAB', 'C1') FROM dual;");
     expect(f.fix!.some((l) => l.startsWith("SELECT DBMS_STATS.CREATE_EXTENDED_STATS('STATS_LAB', 'C1') FROM dual;"))).toBe(true);
     expect(f.basis).toMatch(/second form of this function creates statistics extensions based on the column group usage recorded/);
@@ -210,9 +218,9 @@ describe("STATS_LAB.C1 (no usage recorded, no indexes)", () => {
 describe("histograms: edge rules", () => {
   const unusedHist = [col("FLAG", { histogram: "FREQUENCY", numBuckets: 2, numDistinct: 2, usage: [] }), col("OTHER", { usage: ["EQ"] })];
   test("a histogram nobody filters on: warn with a REPEAT / SIZE 1 call", () => {
-    const f = find(histogramsSection(ctx({ columns: unusedHist }))!, /^FLAG has a histogram but no recorded predicate uses it/)!;
+    const f = find(histogramsSection(ctx({ columns: unusedHist }))!, /^FLAG has a histogram but no recorded filter or join uses it/)!;
     expect(f.level).toBe("warn");
-    expect(f.fix).toEqual(["EXEC DBMS_STATS.GATHER_TABLE_STATS('APP', 'T', method_opt => 'FOR ALL COLUMNS SIZE REPEAT FOR COLUMNS SIZE 1 FLAG')  -- REPEAT keeps the other histograms, SIZE 1 deletes this one"]);
+    expect(f.fix).toEqual(["-- REPEAT keeps the other histograms, SIZE 1 deletes this one", "EXEC DBMS_STATS.GATHER_TABLE_STATS('APP', 'T', method_opt => 'FOR ALL COLUMNS SIZE REPEAT FOR COLUMNS SIZE 1 FLAG')"]);
     expect(f.basis).toMatch(/do not query the table, then the database does not create histograms/);
   });
   test("SKEWONLY would bring it back: the fix changes the preference", () => {
@@ -226,7 +234,7 @@ describe("histograms: edge rules", () => {
   test("a support histogram is never called unused", () => {
     const s = histogramsSection(ctx({ columns: [col("P", { histogram: "HYBRID", numBuckets: 254, numDistinct: 900, notes: "INCREMENTAL HIST_FOR_INCREM_STATS" })] }, { partitioned: true, partitions: 4, incremental: "TRUE" }))!;
     expect(texts(s, "warn")).toEqual([]);
-    expect(texts(s, "info")[0]).toMatch(/P has a histogram only to derive/);
+    expect(texts(s, "info")[0]).toMatch(/P has a histogram that only supports/);
   });
   test("usage that was not collected is said, and no histogram is judged", () => {
     const s = histogramsSection(ctx({ columnUsageCollected: false, columns: unusedHist }))!;
@@ -244,23 +252,24 @@ describe("histograms: edge rules", () => {
     expect(auto.fix).toBeUndefined();
     expect(auto.text).toMatch(/already is AUTO_SAMPLE_SIZE/);
   });
-  test("a HYBRID histogram from under half the rows is a sampled one", () => {
+  test("a HYBRID histogram from a sample is normal under AUTO_SAMPLE_SIZE: shown in the table, not a finding", () => {
     const columns = [col("H", { histogram: "HYBRID", numBuckets: 254, numDistinct: 5000, sampleSize: 300, usage: ["EQ"] })];
-    const f = find(histogramsSection(ctx({ columns }))!, /built from a sample/)!;
-    expect(f.level).toBe("info");
-    expect(f.text).toMatch(/H \(300 of 1,000 rows\)/);
-    expect(find(histogramsSection(ctx({ columns: [col("H", { histogram: "HYBRID", numBuckets: 254, numDistinct: 5000, sampleSize: 990, usage: ["EQ"] })] }))!, /built from a sample/)).toBeUndefined();
+    const s = histogramsSection(ctx({ columns }))!;
+    expect(find(s, /sample/)).toBeUndefined();
+    expect(s.rows!.body[0]![4]).toBe("300 (30%)");
   });
   test("254 buckets for more distinct values and equality use: SIZE 2048 is an option, written as a comment", () => {
     const columns = [col("K", { histogram: "HYBRID", numBuckets: 254, numDistinct: 4000, usage: ["EQ"] })];
     const f = find(histogramsSection(ctx({ columns }))!, /more distinct values than buckets/)!;
     expect(f.level).toBe("info");
-    expect(f.fix![0]).toMatch(/^-- option, not a recommendation: EXEC DBMS_STATS.SET_TABLE_PREFS\('APP', 'T', 'METHOD_OPT', 'FOR ALL COLUMNS SIZE AUTO FOR COLUMNS SIZE 2048 K'\)/);
+    expect(f.fix).toEqual(["-- an option, not a recommendation", "-- EXEC DBMS_STATS.SET_TABLE_PREFS('APP', 'T', 'METHOD_OPT', 'FOR ALL COLUMNS SIZE AUTO FOR COLUMNS SIZE 2048 K')"]);
     expect(f.basis).toMatch(/Must be in the range \[1,2048\]/);
   });
   test("a frequency histogram with one bucket per value is exact", () => {
-    const f = find(histogramsSection(ctx({ columns: [col("S", { histogram: "FREQUENCY", numBuckets: 4, numDistinct: 4, usage: ["EQ"] })] }))!, /one bucket per distinct value/)!;
+    const f = find(histogramsSection(ctx({ columns: [col("S", { histogram: "FREQUENCY", numBuckets: 4, numDistinct: 4, usage: ["EQ"] })] }))!, /one bucket per value/)!;
     expect(f.level).toBe("good");
+    // built from a sample (a fixed ESTIMATE_PERCENT earlier): not exact
+    expect(find(histogramsSection(ctx({ columns: [col("S", { histogram: "FREQUENCY", numBuckets: 4, numDistinct: 4, sampleSize: 100, usage: ["EQ"] })] }))!, /one bucket per value/)).toBeUndefined();
   });
   test("a used column without a histogram: the next SIZE AUTO gather may build one, and on an incremental table it rereads", () => {
     const columns = [col("C", { usage: ["EQ"], numDistinct: 40 })];
@@ -289,9 +298,9 @@ describe("histograms: edge rules", () => {
   });
   test("owner and table fall back to placeholders and quotes are doubled", () => {
     const f = find(histogramsSection(ctx({ columns: unusedHist }, { owner: "", tableName: "" }))!, /FLAG has a histogram/)!;
-    expect(f.fix![0]).toContain("GATHER_TABLE_STATS('OWNER', 'TABLE'");
+    expect(f.fix![1]).toContain("GATHER_TABLE_STATS('OWNER', 'TABLE'");
     const q = find(histogramsSection(ctx({ columns: unusedHist }, { owner: "O'NEIL" }))!, /FLAG has a histogram/)!;
-    expect(q.fix![0]).toContain("GATHER_TABLE_STATS('O''NEIL', 'T'");
+    expect(q.fix![1]).toContain("GATHER_TABLE_STATS('O''NEIL', 'T'");
   });
 });
 
@@ -304,7 +313,7 @@ describe("extended statistics: edge rules", () => {
     const seeded = extendedSection(ctx({ columns: base, extensions: [group({ used: false }), ext("SYS_STU2", '("A","C")', { used: true }), ext("SYS_STU3", '("B","C")', { used: true })] }))!;
     const f = find(seeded, /^\(A, B\): no recorded use/)!;
     expect(f.level).toBe("warn");
-    expect(f.text).toMatch(/since the last RESET_COL_USAGE/);
+    expect(f.text).toMatch(/confirm over a representative workload before dropping it/);
     expect(f.fix).toContain("EXEC DBMS_STATS.DROP_EXTENDED_STATS('APP', 'T', '(\"A\",\"B\")')");
     expect(f.basis).toMatch(/This procedure deletes the recorded column \(group\) usage information/);
   });
@@ -312,15 +321,17 @@ describe("extended statistics: edge rules", () => {
     const c = ctx({ columns: base, extensions: [group({ hasStats: false, numDistinct: null })] }, { partitioned: true, partitions: 6, incremental: "TRUE" });
     const f = find(extendedSection(c)!, /has no statistics yet/)!;
     expect(f.level).toBe("warn");
-    expect(f.text).toMatch(/rereads every unlocked partition once/);
+    expect(f.text).toMatch(/rereads every unlocked partition/);
   });
   test("an expression extension no predicate uses is a warning; one a function-based index already carries is redundant", () => {
     const e1 = ext("SYS_STU4", '(UPPER("T_N"))', { used: false });
     const e2 = ext("SYS_STU5", '(LOWER("T_N"))', { used: true });
     const s = extendedSection(ctx({ columns: base, extensions: [e1, e2], fbiExpressions: ['LOWER("T_N")'] }))!;
-    expect(find(s, /^\(UPPER\("T_N"\)\): no predicate on this expression/)!.level).toBe("warn");
-    const red = find(s, /^\(LOWER\("T_N"\)\) is redundant/)!;
-    expect(red.level).toBe("warn");
+    const unusedExpr = find(s, /^\(UPPER\("T_N"\)\): no predicate on this expression/)!;
+    expect(unusedExpr.level).toBe("info"); // no timestamp: the extension may be younger than the workload
+    expect(unusedExpr.fix![0]).toMatch(/SEED_COL_USAGE does not record expressions/);
+    const red = find(s, /^\(LOWER\("T_N"\)\) may be redundant/)!;
+    expect(red.level).toBe("info");
     expect(red.basis).toMatch(/unless a function-based index exists/);
     expect(red.fix).toEqual(["EXEC DBMS_STATS.DROP_EXTENDED_STATS('APP', 'T', '(LOWER(\"T_N\"))')"]);
   });
@@ -333,7 +344,7 @@ describe("extended statistics: edge rules", () => {
     const f = find(s, /expressions in cached plans filter on/)!;
     expect(f.level).toBe("info");
     expect(f.text).toMatch(/weak evidence/);
-    expect(f.text).toMatch(/counts against the limit of 20/);
+    expect(f.text).toMatch(/Each counts toward the limit of 20/);
     expect(f.fix).toEqual([
       "SELECT DBMS_STATS.CREATE_EXTENDED_STATS('APP', 'T', '(SUBSTR(\"C\",1,2))') FROM dual;",
       "SELECT DBMS_STATS.CREATE_EXTENDED_STATS('APP', 'T', '(TO_CHAR(\"D\",''YYYY''))') FROM dual;",
@@ -384,7 +395,7 @@ describe("indexes: edge rules", () => {
   });
   test("a unique index with no use is not a candidate; a table of nothing but those gets an info line", () => {
     const s = indexesSection(ctx({ columns: cols, indexes: [idx("PK", { uniqueness: "UNIQUE", totalAccessCount: null, totalExecCount: null, lastUsed: null }), idx("IX", { totalAccessCount: 0, totalExecCount: 0, lastUsed: null })] }))!;
-    expect(find(s, /^No recorded use: IX\./)!.level).toBe("warn");
+    expect(find(s, /^No recorded use: IX\./)!.level).toBe("info");
     expect(find(s, /^No recorded use/)!.text).toMatch(/PK is unique and serves a constraint/);
     // an index with a last-used date counts as used even when the access counter says 0
     expect(find(indexesSection(ctx({ columns: cols, indexes: [idx("IX", { totalAccessCount: 0, totalExecCount: 12, lastUsed: "2026-09-26 14:56:54" })] }))!, /No recorded use/)).toBeUndefined();
@@ -409,7 +420,7 @@ describe("indexes: edge rules", () => {
   });
   test("CASCADE TRUE says the same as AUTO_CASCADE; FALSE does no index work", () => {
     const indexes = [idx("IX", { leafBlocks: 10 })];
-    expect(find(indexesSection(ctx({ columns: cols, indexes }, { cascade: "TRUE" }))!, /CASCADE is TRUE, a gather of the table scans all 1 index in full/)).toBeDefined();
+    expect(find(indexesSection(ctx({ columns: cols, indexes }, { cascade: "TRUE" }))!, /CASCADE is TRUE, so a gather of the table also gathers 1 index/)).toBeDefined();
     expect(find(indexesSection(ctx({ columns: cols, indexes }, { cascade: "FALSE" }))!, /CASCADE is FALSE/)!.level).toBe("info");
     expect(find(indexesSection(ctx({ columns: cols, indexes }, { cascade: "AUTO_CASCADE" }))!, /AUTO_CASCADE/)!.level).toBe("info"); // 10 leaf blocks against 50 table blocks
   });
@@ -433,7 +444,7 @@ describe("statistics quality: edge rules", () => {
   test("more nulls than rows, or more values than rows, are impossible", () => {
     const s = qualitySection(ctx({ columns: [col("N", { numNulls: 1500 }), col("V", { numDistinct: 5000 })] }))!;
     expect(find(s, /^N \(1,500 nulls\): more nulls than the table has rows/)!.level).toBe("bad");
-    expect(find(s, /^V \(NDV 5,000\): more distinct values than non-null rows/)!.level).toBe("bad");
+    expect(find(s, /^V \(NDV 5,000\): more distinct values than non-null rows/)!.level).toBe("warn"); // NDVs are approximate
   });
   test("density has to be 1/NDV without a histogram", () => {
     const s = qualitySection(ctx({ columns: [col("D", { numDistinct: 100, density: 0.05 }), col("H", { numDistinct: 100, density: 0.5, histogram: "FREQUENCY" })] }))!;
@@ -460,10 +471,13 @@ describe("statistics quality: edge rules", () => {
   test("a date column whose high value is not later than the gather, with rows changed since, is out of range", () => {
     const d = col("ORDER_DATE", { dataType: "DATE", high: "2026-09-30 23:59:59", inIndex: true });
     const warn = find(qualitySection(ctx({ columns: [d], rowsChanged: 50 }))!, /^ORDER_DATE \(high value 2026-09-30\)/)!;
-    expect(warn.level).toBe("warn");
-    expect(warn.text).toMatch(/above the HIGH_VALUE/);
-    expect(warn.text).toMatch(/Exadata and cloud/);
+    expect(warn.level).toBe("info"); // 5% changed, the table is not stale
+    expect(warn.text).toMatch(/above HIGH_VALUE/);
     expect(warn.basis).toMatch(/inferred/);
+    expect(find(qualitySection(ctx({ columns: [d], rowsChanged: 200 }))!, /^ORDER_DATE \(high value/)!.level).toBe("warn"); // past STALE_PERCENT
+    // a date that ends months before the gather is not an ever-growing column; under 1% changed is not worth a note
+    expect(find(qualitySection(ctx({ columns: [col("ORDER_DATE", { dataType: "DATE", high: "2026-03-01 00:00:00", inIndex: true })], rowsChanged: 200 }))!, /high value/)).toBeUndefined();
+    expect(find(qualitySection(ctx({ columns: [d], rowsChanged: 5 }))!, /high value/)).toBeUndefined();
     // no DML since: nothing to say; a high value in the future: nothing either
     expect(find(qualitySection(ctx({ columns: [d], rowsChanged: 0 }))!, /high value/)).toBeUndefined();
     expect(find(qualitySection(ctx({ columns: [col("ORDER_DATE", { dataType: "DATE", high: "2030-01-01 00:00:00", inIndex: true })], rowsChanged: 50 }))!, /high value/)).toBeUndefined();
@@ -493,5 +507,85 @@ describe("statistics quality: edge rules", () => {
   });
   test("a clean table gets one good finding", () => {
     expect(levels(qualitySection(ctx({ columns: [col("A", { numDistinct: 10, density: 0.1, sampleSize: 1000 })] }))!)).toEqual(["good"]);
+  });
+});
+
+describe("ORASTATS_TEST.EXPR_PRED with a cached plan (first positive expression candidates and a directive candidate)", () => {
+  const c = load("orastats_test-expr_pred-cached");
+  test("the two expressions of the cached plan are proposed, as comments on weak evidence, with valid SQL*Plus", () => {
+    expect(c.detail.expressionCandidates).toEqual(['SUBSTR("C_N",1,3)', 'UPPER("T_N")']);
+    const s = extendedSection(c)!;
+    const f = find(s, /expressions in cached plans filter on SUBSTR\("C_N",1,3\), UPPER\("T_N"\)/)!;
+    expect(f.level).toBe("info");
+    expect(f.text).toMatch(/One cached statement is weak evidence/);
+    expect(f.fix).toEqual([
+      "SELECT DBMS_STATS.CREATE_EXTENDED_STATS('ORASTATS_TEST', 'EXPR_PRED', '(SUBSTR(\"C_N\",1,3))') FROM dual;",
+      "SELECT DBMS_STATS.CREATE_EXTENDED_STATS('ORASTATS_TEST', 'EXPR_PRED', '(UPPER(\"T_N\"))') FROM dual;",
+    ]);
+    expect(s.rows!.body.filter((r) => r[1] === "expression, proposed").map((r) => r[0])).toEqual(['(SUBSTR("C_N",1,3))', '(UPPER("T_N"))']);
+    expect(s.summary).toMatch(/3 proposed/);
+  });
+  test("the directive candidate (C_N, T_N) is evidence only: nested to independent between 92,120 and 100,000", () => {
+    const f = find(extendedSection(c)!, /^\(C_N, T_N\)/)!;
+    expect(f.text).toMatch(/a SQL plan directive recorded a misestimate on them together, with equality predicates/);
+    expect(f.text).toMatch(/multiply to 16,581,600; the true number of combinations lies between 92,120 \(nested columns\) and 100,000 \(independent columns\)/);
+    expect(f.fix).toBeUndefined();
+  });
+});
+
+describe("generated SQL is valid SQL*Plus", () => {
+  // SQL*Plus passes a trailing -- comment on to the server: EXEC x -- c ends in BEGIN x -- c; END; and SELECT ...; -- c fails (checked on 19.27)
+  test("no fix line carries a trailing comment, on any fixture", () => {
+    for (const name of ["orastats_test-expr_pred", "orastats_test-expr_pred-cached", "orastats_test-orders", "stats_lab-c1", "stats_lab-cg1", "stats_lab-sales"]) {
+      const c = load(name);
+      for (const sec of [histogramsSection(c), extendedSection(c), indexesSection(c), qualitySection(c)]) {
+        for (const f of sec?.findings ?? []) for (const line of f.fix ?? []) expect(line.startsWith("--") || !/\s--\s/.test(line), `${name}: ${line}`).toBe(true);
+      }
+    }
+  });
+});
+
+describe("extended statistics: more rules", () => {
+  const base = [col("A"), col("B")];
+  test("a function-based index's hidden column (SYS_NC...) is neither an unused nor a redundant extension", () => {
+    const hidden = ext("SYS_NC00017$", 'LOWER("A")', { used: false });
+    const s = extendedSection(ctx({ columns: base, extensions: [hidden], fbiExpressions: ['LOWER("A")'] }))!;
+    expect(s.summary).toMatch(/0 column groups, 0 expression extensions/);
+    expect(find(s, /LOWER/)).toBeUndefined();
+  });
+  test("a group without statistics is never called independent; one with a ratio of 1.5 or more is correlated", () => {
+    const nd = [col("A", { numDistinct: 10 }), col("B", { numDistinct: 10 })];
+    const none = extendedSection(ctx({ columns: nd, extensions: [ext("SYS_STU1", '("A","B")', { hasStats: false, numDistinct: null })] }))!;
+    expect(find(none, /independent/)).toBeUndefined();
+    const indep = extendedSection(ctx({ columns: nd, extensions: [ext("SYS_STU1", '("A","B")', { numDistinct: 99 })] }, { numRows: 100000 }))!;
+    expect(find(indep, /^\(A, B\): 99 distinct combinations against 100/)!.level).toBe("warn");
+    const corr = extendedSection(ctx({ columns: nd, extensions: [ext("SYS_STU1", '("A","B")', { numDistinct: 20 })] }, { numRows: 100000 }))!;
+    expect(find(corr, /^\(A, B\): 20 distinct combinations against 100 for independent columns \(5 times fewer\)/)!.level).toBe("info");
+  });
+});
+
+describe("indexes: more rules", () => {
+  const cols = [col("A"), col("B")];
+  test("an index that is already invisible is not told to become invisible again", () => {
+    const f = find(indexesSection(ctx({ columns: cols, indexes: [idx("IX", { visibility: "INVISIBLE", totalAccessCount: null, totalExecCount: null, lastUsed: null }), idx("IY", { totalAccessCount: null, totalExecCount: null, lastUsed: null })] }))!, /^DBA_INDEX_USAGE has no row/)!;
+    expect(f.fix).toEqual(["ALTER INDEX APP.IY INVISIBLE;", "-- undo: ALTER INDEX APP.IY VISIBLE;"]);
+    expect(f.text).toMatch(/IX is already invisible/);
+  });
+  test("a prefix is not reported across index kinds or localities", () => {
+    const s = indexesSection(ctx({ columns: cols, indexes: [idx("IX_A", { columns: ["A"], locality: "LOCAL" }), idx("IX_AB", { columns: ["A", "B"], locality: "GLOBAL" })] }))!;
+    expect(find(s, /leading prefix/)).toBeUndefined();
+  });
+  test("stale index statistics say 'while the table is not' only when the table's verdict is known", () => {
+    const indexes = [idx("IX", { staleStats: true })];
+    expect(find(indexesSection(ctx({ columns: cols, indexes, staleStats: false }))!, /flagged stale while the table is not/)).toBeDefined();
+    expect(find(indexesSection(ctx({ columns: cols, indexes, staleStats: null }))!, /flagged stale\./)).toBeDefined();
+  });
+});
+
+describe("statistics quality: more rules", () => {
+  test("a LOB or XML column without statistics is not reported as missing", () => {
+    const s = qualitySection(ctx({ columns: [col("DOC", { dataType: "CLOB", lastAnalyzed: null, numDistinct: null }), col("NEW", { lastAnalyzed: null, numDistinct: null })] }))!;
+    expect(find(s, /^NEW has no column statistics/)).toBeDefined();
+    expect(find(s, /DOC/)).toBeUndefined();
   });
 });

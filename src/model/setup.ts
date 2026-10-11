@@ -114,7 +114,7 @@ export function setupScripts(before: Input, prov: Provenance | null): SetupScrip
   else if (known) rollback.push("-- A preference the table did not set itself is deleted, so it inherits again; the others get their old value back.");
   else rollback.push("-- The paste did not say which preferences the table set itself (the current collect.sql does), so each one is pinned to its old value in force.");
   for (const p of changed) {
-    if (known && !tableLevel.has(p.name)) rollback.push(`${del(p.name)}   -- inherited: ${p.before ?? "NULL"}`);
+    if (known && !tableLevel.has(p.name)) rollback.push(`-- inherited: ${p.before ?? "NULL"}`, del(p.name));
     else rollback.push(set(p.name, p.before));
   }
   if (changed.length && before.partitioned) {

@@ -77,12 +77,13 @@ SYNOPSES = none
     expect(apply).toMatch(/pins the 2 columns that have a histogram today: STATUS, REGION/);
     expect(apply).toMatch(/Then build the synopses/);
     expect(execs(rollback)).toEqual([
-      "EXEC DBMS_STATS.DELETE_TABLE_PREFS('STATS_LAB', 'E1', 'INCREMENTAL')   -- inherited: FALSE",
-      "EXEC DBMS_STATS.DELETE_TABLE_PREFS('STATS_LAB', 'E1', 'INCREMENTAL_STALENESS')   -- inherited: NULL",
+      "EXEC DBMS_STATS.DELETE_TABLE_PREFS('STATS_LAB', 'E1', 'INCREMENTAL')",
+      "EXEC DBMS_STATS.DELETE_TABLE_PREFS('STATS_LAB', 'E1', 'INCREMENTAL_STALENESS')",
       "EXEC DBMS_STATS.SET_TABLE_PREFS('STATS_LAB', 'E1', 'GRANULARITY', 'global and partition')",
       "EXEC DBMS_STATS.SET_TABLE_PREFS('STATS_LAB', 'E1', 'METHOD_OPT', 'for all columns size auto')",
-      "EXEC DBMS_STATS.DELETE_TABLE_PREFS('STATS_LAB', 'E1', 'PREFERENCE_OVERRIDES_PARAMETER')   -- inherited: FALSE",
+      "EXEC DBMS_STATS.DELETE_TABLE_PREFS('STATS_LAB', 'E1', 'PREFERENCE_OVERRIDES_PARAMETER')",
     ]);
+    expect(rollback).toMatch(/-- inherited: NULL\nEXEC DBMS_STATS.DELETE_TABLE_PREFS\('STATS_LAB', 'E1', 'INCREMENTAL_STALENESS'\)/);
   });
 
   test("an empty TABLE_PREFS line means: known, none; SET_TABLE_PREFS calls mark table level; SQL NULL resets staleness to its default", () => {
@@ -92,7 +93,8 @@ SYNOPSES = none
     expect(calls.provenance.tablePrefs).toEqual(["INCREMENTAL_STALENESS"]);
     const { rollback } = setupScripts({ ...base, ...calls.values }, calls.provenance);
     expect(execs(rollback)).toContain("EXEC DBMS_STATS.SET_TABLE_PREFS('SHOP', 'SALES', 'INCREMENTAL_STALENESS', 'ALLOW_MIXED_FORMAT')");
-    expect(execs(rollback)).toContain("EXEC DBMS_STATS.DELETE_TABLE_PREFS('SHOP', 'SALES', 'INCREMENTAL')   -- inherited: FALSE");
+    expect(execs(rollback)).toContain("EXEC DBMS_STATS.DELETE_TABLE_PREFS('SHOP', 'SALES', 'INCREMENTAL')");
+    expect(rollback).toContain("-- inherited: FALSE\nEXEC DBMS_STATS.DELETE_TABLE_PREFS('SHOP', 'SALES', 'INCREMENTAL')");
   });
 
   test("a pinned METHOD_OPT is kept as pasted; a plain table gets no synopsis talk", () => {

@@ -81,7 +81,7 @@ This is the one list; the extension review below adds to it.
 - Health check: it works on dictionary heuristics, developed against one 19.27 lab database.
   `DBA_INDEX_USAGE` is sampled (`_iut_stat_collection_type` = SAMPLED, 15-minute flush), so "unused"
   is a hint. Expression candidates come from `V$SQL_PLAN`, so only from cached plans (weak
-  evidence); the regex found no positive case on the lab tables. DML counters are flushed
+  evidence); one positive case on the lab (lab Q11). DML counters are flushed
   periodically, so the staleness forecast is as current as the last flush. The missing-privilege
   path of `REPORT_COL_USAGE` in the collector was not tested as a non-SYSDBA user.
 - Real-time statistics and the high-frequency task are licensed only for Exadata and Exadata Cloud

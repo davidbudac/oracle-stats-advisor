@@ -150,6 +150,22 @@ describe("parseDetail: ORASTATS_TEST.EXPR_PRED (expression statistics)", () => {
   });
 });
 
+describe("parseDetail: ORASTATS_TEST.EXPR_PRED after a cached plan (first positive EXPRESSION_CANDIDATES and directive candidate)", () => {
+  const { p, d } = detailOf("orastats_test-expr_pred-cached");
+  test("two expression candidates from V$SQL_PLAN, the table alias dropped", () => {
+    expect(d.expressionCandidates).toEqual(['SUBSTR("C_N",1,3)', 'UPPER("T_N")']);
+    expect(d.fbiExpressions).toEqual([]);
+    expect(d.extensions).toHaveLength(6); // the candidates are not among them
+  });
+  test("one directive candidate (C_N, T_N) with equality predicates", () => {
+    expect(p.provenance.columnGroupCandidates).toEqual([{ columns: ["C_N", "T_N"], sources: ["directive"], equality: true, ndvProduct: 16_581_600 }]);
+  });
+  test("the dry run is in the history; nothing in the block is left unread", () => {
+    expect(d.history.some((h) => /reporting mode/.test(h.operation) && h.status === "FAILED")).toBe(true);
+    expect(p.detailIgnored).toEqual([]);
+  });
+});
+
 describe("parseDetail: robustness", () => {
   const block = (...body: string[]) => ["-- ADVISOR DETAIL BEGIN", ...body, "-- ADVISOR DETAIL END"];
 

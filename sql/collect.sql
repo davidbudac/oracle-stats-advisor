@@ -7,9 +7,15 @@
 --
 -- Run it in the PDB that owns the table, as a user who can read the DBA_* views and call
 -- DBMS_STATS. The reports need more: REPORT_GATHER_TABLE_STATS ownership or ANALYZE ANY,
--- REPORT_COL_USAGE (statements 2 and 5) SYSDBA or ANALYZE ANY DICTIONARY plus ANALYZE ANY, and
--- statement 3 reads SYS.WRI$_OPTSTAT_SYNOPSIS_HEAD$ (SYSDBA). Each is skipped without the privilege;
--- SELECT_CATALOG_ROLE + EXECUTE alone is not sufficient for every report.
+-- REPORT_COL_USAGE (statements 2, 5 and the DETAIL column usage) SYSDBA or ANALYZE ANY DICTIONARY
+-- plus ANALYZE ANY, and statement 3 reads SYS.WRI$_OPTSTAT_SYNOPSIS_HEAD$ (SYSDBA). The DETAIL
+-- block (statements 7 to 28) also reads V$PARAMETER, V$INSTANCE, V$SQL_PLAN, V$SYSAUX_OCCUPANTS,
+-- DBA_INDEX_USAGE, DBA_OPTSTAT_OPERATIONS / DBA_OPTSTAT_OPERATION_TASKS, DBA_TAB_STATS_HISTORY,
+-- DBA_AUTOTASK_CLIENT / DBA_AUTOTASK_WINDOW_CLIENTS / DBA_AUTOTASK_JOB_HISTORY, DBA_SCHEDULER_WINDOWS,
+-- DBA_AUTO_STAT_EXECUTIONS, DBA_TAB_PENDING_STATS and calls DBMS_STATS.GET_STATS_HISTORY_RETENTION /
+-- _AVAILABILITY and GET_PREFS. Each statement is skipped without the privilege (the page then says
+-- which health sections were not checked); SELECT_CATALOG_ROLE + EXECUTE alone is not sufficient for
+-- every report. The scripts were validated as SYSDBA on 19.27; the reduced-privilege paths were not.
 -- Input owner/table names must be conventional unquoted identifiers.
 -- See docs/oracle19c-review.md for the review and remaining model limits.
 --
@@ -461,7 +467,8 @@ WITH p AS (
 ), ext AS (
   SELECT e.extension_name, DBMS_LOB.SUBSTR(e.extension, 4000, 1) AS txt
   FROM   p, dba_stat_extensions e
-  WHERE  e.owner = p.own AND e.table_name = p.tab AND DBMS_LOB.SUBSTR(e.extension, 1, 1) = '('
+  WHERE  e.owner = p.own AND e.table_name = p.tab
+  AND    REGEXP_LIKE(DBMS_LOB.SUBSTR(e.extension, 4000, 1), '^\(\s*"[^"]+"(\s*,\s*"[^"]+")+\s*\)$')  -- column groups only, not ("A"+"B")
 ), extset AS (
   SELECT ext.extension_name,
          LISTAGG(REGEXP_SUBSTR(ext.txt, '"([^"]+)"', 1, n.i, NULL, 1), ',')
@@ -516,7 +523,8 @@ WITH p AS (
 ), ext AS (
   SELECT e.extension_name, DBMS_LOB.SUBSTR(e.extension, 4000, 1) AS txt
   FROM   p, dba_stat_extensions e
-  WHERE  e.owner = p.own AND e.table_name = p.tab AND DBMS_LOB.SUBSTR(e.extension, 1, 1) = '('
+  WHERE  e.owner = p.own AND e.table_name = p.tab
+  AND    REGEXP_LIKE(DBMS_LOB.SUBSTR(e.extension, 4000, 1), '^\(\s*"[^"]+"(\s*,\s*"[^"]+")+\s*\)$')  -- column groups only, not ("A"+"B")
 ), extset AS (
   SELECT ext.extension_name,
          LISTAGG(REGEXP_SUBSTR(ext.txt, '"([^"]+)"', 1, n.i, NULL, 1), ',')
@@ -625,8 +633,8 @@ WITH p AS (
   SELECT CASE WHEN EXISTS (SELECT 1 FROM p JOIN dba_tab_col_statistics c ON c.owner = p.own AND c.table_name = p.tab WHERE c.notes LIKE '%STATS_ON_LOAD%')
                 OR EXISTS (SELECT 1 FROM p JOIN dba_tab_statistics s ON s.owner = p.own AND s.table_name = p.tab WHERE s.notes LIKE '%STATS_ON_LOAD%')
               THEN 'Y' ELSE 'N' END AS on_load,
-         CASE WHEN EXISTS (SELECT 1 FROM p JOIN dba_tab_col_statistics c ON c.owner = p.own AND c.table_name = p.tab WHERE c.notes LIKE '%STATS_ON_CONVENTIONAL_DML%')
-                OR EXISTS (SELECT 1 FROM p JOIN dba_tab_statistics s ON s.owner = p.own AND s.table_name = p.tab WHERE s.notes LIKE '%STATS_ON_CONVENTIONAL_DML%')
+         CASE WHEN EXISTS (SELECT 1 FROM p JOIN dba_tab_col_statistics c ON c.owner = p.own AND c.table_name = p.tab WHERE c.notes LIKE '%STATS_ON_CONVENTIONAL_%')
+                OR EXISTS (SELECT 1 FROM p JOIN dba_tab_statistics s ON s.owner = p.own AND s.table_name = p.tab WHERE s.notes LIKE '%STATS_ON_CONVENTIONAL_%')
               THEN 'Y' ELSE 'N' END AS rt_notes
   FROM   dual
 )

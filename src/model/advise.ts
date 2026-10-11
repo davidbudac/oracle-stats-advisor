@@ -324,14 +324,18 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
         const other = (name: string) => `EXEC DBMS_STATS.SET_TABLE_PREFS(${lit(p.owner, "OWNER")}, 'STAGING_TABLE', '${name}'`;
         const mtext = METHOD_OPT_TEXT[p.methodOpt];
         fixAt(2, "-- Exchange recipe (lab V3, V3b), for the next exchange (this one is done): make the staging table and the target agree before it");
-        fixAt(2, `${sp("METHOD_OPT", mtext)}  -- the partitioned table: an explicit METHOD_OPT, the same text on both tables`);
+        fixAt(2, "-- the partitioned table: an explicit METHOD_OPT, the same text on both tables");
+        fixAt(2, `${sp("METHOD_OPT", mtext)}`);
         fixAt(2, `${other("METHOD_OPT")}, '${mtext}')`);
         fixAt(2, `${other("INCREMENTAL")}, 'TRUE')`);
         fixAt(2, `${other("INCREMENTAL_LEVEL")}, 'TABLE')`);
-        fixAt(2, `EXEC DBMS_STATS.GATHER_TABLE_STATS(${OT}, partname => ${tgt}, granularity => 'PARTITION')  -- the still empty target partition`);
-        fixAt(2, `EXEC DBMS_STATS.GATHER_TABLE_STATS(${lit(p.owner, "OWNER")}, 'STAGING_TABLE')  -- builds the table-level synopsis`);
+        fixAt(2, "-- the still empty target partition");
+        fixAt(2, `EXEC DBMS_STATS.GATHER_TABLE_STATS(${OT}, partname => ${tgt}, granularity => 'PARTITION')`);
+        fixAt(2, "-- builds the table-level synopsis");
+        fixAt(2, `EXEC DBMS_STATS.GATHER_TABLE_STATS(${lit(p.owner, "OWNER")}, 'STAGING_TABLE')`);
         fixAt(2, `ALTER TABLE ${plainName(p.owner, "OWNER")}.${plainName(p.tableName, "TABLE")} EXCHANGE PARTITION ${plainName(p.newPartitionName, "NEW_PARTITION")} WITH TABLE STAGING_TABLE`);
-        fixAt(2, `EXEC DBMS_STATS.GATHER_TABLE_STATS(${OT})  -- reads nothing for the exchanged partition, merges the global statistics`);
+        fixAt(2, "-- reads nothing for the exchanged partition, merges the global statistics");
+        fixAt(2, `EXEC DBMS_STATS.GATHER_TABLE_STATS(${OT})`);
       }
     }
 
@@ -366,10 +370,14 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
     if ((!pubOn && gathered) || p.pendingStats) {
       const pend = "19c DBMS_STATS reference, Pending Statistics";
       fixAt(3, "-- Test the pending statistics, then publish or discard them:");
-      fixAt(3, "ALTER SESSION SET OPTIMIZER_USE_PENDING_STATISTICS = TRUE;  -- this session only; run the workload or EXPLAIN PLAN");
-      fixAt(3, `SELECT * FROM TABLE(DBMS_STATS.DIFF_TABLE_STATS_IN_PENDING(${OT}, NULL, 10));  -- what differs from the published statistics by more than 10 percent`);
-      fixAt(3, `EXEC DBMS_STATS.PUBLISH_PENDING_STATS(${OT})  -- if the plans are good`);
-      fixAt(3, `EXEC DBMS_STATS.DELETE_PENDING_STATS(${OT})  -- if they are not`);
+      fixAt(3, "-- this session only; run the workload or EXPLAIN PLAN");
+      fixAt(3, "ALTER SESSION SET OPTIMIZER_USE_PENDING_STATISTICS = TRUE;");
+      fixAt(3, "-- what differs from the published statistics by more than 10 percent");
+      fixAt(3, `SELECT * FROM TABLE(DBMS_STATS.DIFF_TABLE_STATS_IN_PENDING(${OT}, NULL, 10));`);
+      fixAt(3, "-- if the plans are good");
+      fixAt(3, `EXEC DBMS_STATS.PUBLISH_PENDING_STATS(${OT})`);
+      fixAt(3, "-- if they are not");
+      fixAt(3, `EXEC DBMS_STATS.DELETE_PENDING_STATS(${OT})`);
       if (!flat && isInc) fixAt(3, "-- under INCREMENTAL prefer DELETE_PENDING_STATS and a gather with PUBLISH TRUE: published pending statistics leave the global NOTES blank and the next gather rereads every partition (lab Tf)");
       if (!pubOn) fixAt(3, "-- PUBLISH_PENDING_STATS does not change the PUBLISH preference: set it back to TRUE when the test is over");
       if (!pubOn && gathered) add("info", `The pending-statistics workflow: ALTER SESSION SET OPTIMIZER_USE_PENDING_STATISTICS = TRUE in a test session to run queries against the pending values, DIFF_TABLE_STATS_IN_PENDING to compare them with the published ones, then PUBLISH_PENDING_STATS or DELETE_PENDING_STATS (see the fixes). "The statistics stored in private area are not used by Cost Based Optimizer unless parameter optimizer_use_pending_statistics is set to TRUE."`, `${pend}; lab G1`);
@@ -646,7 +654,8 @@ export function advise(raw: Partial<Record<keyof Input, unknown>> | null | undef
         setVerdict("warn", "Partitions gathered, global statistics left behind");
         add("warn", `The ${plural(partsRead, "partition")} ${partsRead === 1 ? "gets" : "get"} statistics and ${partsRead === 1 ? "a synopsis" : "synopses"}, but the table as a whole changed by ${pct(tableChange / 100)}, below STALE_PERCENT ${fmt(p.stalePercent, 4)}%, so the job leaves the global statistics alone. The global row count and the partition key's high value lag until the table has changed by STALE_PERCENT: on ten years of monthly partitions, 10% is a year.`, "lab G6, G7, Tb1");
         add("info", "Three ways out: end every load with a plain GATHER_TABLE_STATS, which merges the synopses and reads nothing beyond the new partition; lower STALE_PERCENT on the table; or set PREFERENCE_OVERRIDES_PARAMETER TRUE, under which the job refreshed the global statistics in the lab.", "lab G8, Tb2");
-        fixAt(5, `EXEC DBMS_STATS.GATHER_TABLE_STATS(${OT})  -- after each load: merges the synopses`);
+        fixAt(5, "-- after each load: merges the synopses");
+        fixAt(5, `EXEC DBMS_STATS.GATHER_TABLE_STATS(${OT})`);
         fixAt(7, sp("PREFERENCE_OVERRIDES_PARAMETER", "TRUE"));
         if (S !== "all") { o.synopsesAfter = "partial"; add("info", "Not every partition has a synopsis yet, so the first global refresh will cost a read of the rest.", "inferred, not observed"); } else o.synopsesAfter = "all";
       } else {

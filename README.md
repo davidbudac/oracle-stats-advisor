@@ -192,7 +192,8 @@ sentences). The checks are heuristics over the dictionary, not a proof that a pl
   task (schema `GATHER AUTO` stood in for it).
 - Health check: `DBA_INDEX_USAGE` is sampled (`_iut_stat_collection_type` = SAMPLED, flushed about
   every 15 minutes), so "unused" is a hint. Expression candidates come from cached plans only
-  (`V$SQL_PLAN`); the lab tables gave no positive case. DML counters are flushed periodically
+  (`V$SQL_PLAN`), so they see only statements still in the shared pool (one positive case on the
+  lab, Q11). DML counters are flushed periodically
   (the collector flushes them when it may). The rules were checked on the lab database, nowhere
   else. The missing-privilege path of `REPORT_COL_USAGE` in the collector was not tested as a
   non-SYSDBA user.

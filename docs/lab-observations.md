@@ -203,8 +203,17 @@ database could not be modified in this session, so nothing below was gathered or
 - Q9 All five histogram kinds exist: ORASTATS_TEST.CAL_HB_FULL.C is HEIGHT BALANCED.
 - Q10 Maintenance windows: MONDAY to FRIDAY_WINDOW start 22:00 and last 4 h; SATURDAY_WINDOW and SUNDAY_WINDOW start 06:00 and last
   20 h; WEEKNIGHT_WINDOW and WEEKEND_WINDOW exist but are disabled.
+- Q11 Expression candidates, positive case: after one `SELECT` on ORASTATS_TEST.EXPR_PRED with `UPPER(T_N) = …` and
+  `SUBSTR(C_N, 1, 3) = …` filters, collect.sql statement "expression candidates" (V$SQL_PLAN predicates) printed
+  `EXPRESSION_CANDIDATES = SUBSTR("C_N",1,3);UPPER("T_N")`, and recommend.sql statement 6 printed the two commented
+  CREATE_EXTENDED_STATS lines. The six existing expression extensions on the table were correctly excluded. The same
+  query left a USABLE SQL plan directive on (C_N, T_N), which the INPUT block now reports as a directive candidate
+  (`|directive|eq|`) with OPTIMIZER_ADAPTIVE_STATISTICS = FALSE at system level, so directives can be created while the
+  parameter is FALSE (the Reference: it "does not control the creation of SQL plan directives").
+- Q12 End-to-end run of the final collect.sql, recommend.sql and survey.sql (SYSDBA, PDB1) on STATS_LAB.SALES, C1, CG1, A1,
+  ORASTATS_TEST.EXPR_PRED, ORDERS and SOE.ORDER_ITEMS: no ORA-/SP2- errors except the expected ORA-20005 of the dry run
+  on the locked EXPR_PRED; every output parsed with zero ignored lines and produced all health sections.
 
 Not verified here (listed as limits in `docs/oracle19c-review.md`): GRANULARITY AUTO on LIST or RANGE subpartitions (the lab has
 HASH only); anything the high-frequency task does (it did not run); real-time statistics beside gathers (not available on the
-lab); a job-driven partition exchange; the expression candidates from `V$SQL_PLAN` (the regex found no positive case on the lab
-tables); the missing-privilege path of `REPORT_COL_USAGE` as a non-SYSDBA user.
+lab); a job-driven partition exchange; the missing-privilege path of `REPORT_COL_USAGE` as a non-SYSDBA user.

@@ -125,10 +125,10 @@ Rules of the format:
 
 - Last 7 rows of `DBA_AUTOTASK_JOB_HISTORY` for `auto optimizer stats collection`.
 
-`HFRUN = opid|start_time|end_time|status|completed|failed|timed_out`
+`HFRUN = opid|start_time|end_time|status|completed|failed|timed_out|origin`
 
-- Last 7 rows of `DBA_AUTO_STAT_EXECUTIONS` (`ORIGIN` kept out; the view also lists the
-  nightly task's runs as `AUTO_TASK`, so add `origin` as the last field).
+- Last 7 rows of `DBA_AUTO_STAT_EXECUTIONS`; the view also lists the nightly task's runs as
+  `ORIGIN = AUTO_TASK`, the high-frequency task's as `HIGH_FREQ_AUTO_TASK`.
 
 `PARTITION = name|position|num_rows|blocks|last_analyzed|stale_stats|locked|rows_changed|synopsis`
 
